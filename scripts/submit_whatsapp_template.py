@@ -44,10 +44,10 @@ TEMPLATE_PAYLOAD = {
         {
             "type": "BODY",
             "text": (
-                "Olá, {{1}}! Vi que você entrou em contato pela DB1. Sou o assistente "
-                "virtual da equipe comercial e quero entender melhor o que você precisa "
-                "antes de conectar você com nosso especialista. Leva menos de 5 minutos. "
-                "Posso fazer algumas perguntas rápidas?"
+                "Olá, {{1}}! Aqui é a Alana, analista comercial da DGS. Vi que você "
+                "entrou em contato com a gente pela DB1 e quero entender melhor o seu "
+                "contexto antes de te conectar com o especialista certo. Leva menos de "
+                "5 minutos — posso te fazer algumas perguntas rápidas?"
             ),
             "example": {"body_text": [["Ana"]]},
         }

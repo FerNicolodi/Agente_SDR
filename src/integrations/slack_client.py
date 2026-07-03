@@ -14,7 +14,8 @@ async def notify_closer(briefing_text: str, channel: str | None = None) -> dict:
     """`briefing_text` deve seguir exatamente os campos do protocolo de
     handoff (nome/cargo, empresa/setor, faturamento, score e tier, dor
     principal, urgência, nível decisório, oferta recomendada, horário
-    preferencial, origem do lead) — ver Script do Atendente Virtual, seção 5.
+    preferencial, origem do lead) — ver Script da Alana
+    (Script_Atendente_Virtual_DGS.docx, seção 5).
     """
     payload = {
         "channel": channel or os.environ["SLACK_CLOSER_CHANNEL"],

@@ -19,7 +19,8 @@ def next_step_after_m1(codigos: list[str]) -> AVStep:
 
 def next_step_after_m2(codigos: list[str]) -> AVStep:
     """Se o sinal de dor for o de maior severidade (sistema_parou), pula a M3
-    e vai direto para a M4, conforme o Script do Atendente Virtual."""
+    e vai direto para a M4, conforme o Script da Alana
+    (Script_Atendente_Virtual_DGS.docx)."""
     return AVStep.M4_ENVIADA if "sistema_parou" in codigos else AVStep.M3_ENVIADA
 
 

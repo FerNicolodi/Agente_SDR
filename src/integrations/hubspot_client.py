@@ -53,7 +53,7 @@ async def upsert_contact(email: str, properties: dict) -> dict:
 
 async def create_task(contact_id: str, title: str, body: str, priority: str, due_in_hours: int) -> dict:
     """Cria a Task de handoff para o Closer, conforme o protocolo de briefing
-    do Script do Atendente Virtual (seção 5 do documento de negócio)."""
+    do Script da Alana (Script_Atendente_Virtual_DGS.docx, seção 5)."""
     payload = {
         "properties": {
             "hs_task_subject": title,

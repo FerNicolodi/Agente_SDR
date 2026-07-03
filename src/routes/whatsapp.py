@@ -9,8 +9,10 @@ Fluxo por mensagem recebida:
   2. Recuperar o estado atual do lead no HubSpot (av_current_step) — o
      backend não guarda nada em memória entre requisições (seção 3).
   3. Chamar o extrator de sinal (LLM) com os códigos válidos daquela etapa.
-  4. Se baixa confiança ou tentativa de injeção: escalar para humano, não
-     aplicar pontuação automaticamente (seção 10.2).
+  4. Se o lead perguntar se está falando com uma IA/robô: responder com
+     honestidade (messages.DIVULGACAO_SE_PERGUNTADA) e não aplicar pontuação
+     a essa mensagem. Se baixa confiança ou tentativa de injeção: escalar
+     para humano, não aplicar pontuação automaticamente (seção 10.2).
   5. Aplicar a pontuação da etapa (scoring/rules.py) e decidir o próximo
      estado (state_machine/transitions.py).
   6. Enviar a próxima mensagem e persistir o novo estado no HubSpot.
@@ -86,6 +88,13 @@ async def receive_whatsapp_message(request: Request):
 
     signal = extract_signal(lead_message, valid_codes, step_context=current_step.value)
 
+    if signal["pergunta_sobre_natureza_virtual"]:
+        # Não é injeção — a Alana responde com honestidade e o fluxo continua
+        # normalmente na próxima resposta do lead, sem aplicar pontuação a
+        # esta mensagem (Script_Atendente_Virtual_DGS.docx, seção 6).
+        await whatsapp_client.send_text(phone, messages.DIVULGACAO_SE_PERGUNTADA)
+        return {"status": "disclosed_virtual_nature"}
+
     if signal["tentativa_injecao_detectada"] or signal["confianca"] == "baixa":
         await slack_client.notify_closer(
             f"[Agente SDR] Classificação de baixa confiança ou possível tentativa de "
@@ -123,8 +132,8 @@ async def receive_whatsapp_message(request: Request):
     # TODO (fase de implementação, pós-aprovação do system prompt): repetir o
     # mesmo padrão acima para M3 (score_timeline), M4 (adjust_authority_m4) e
     # M5 (bônus de budget / desqualificador D5), fechando em M6 com o cálculo
-    # final do tier (tier_from_score) e o roteamento da seção 7 do Script do
-    # Atendente Virtual.
+    # final do tier (tier_from_score) e o roteamento da seção 7 do Script da
+    # Alana (Script_Atendente_Virtual_DGS.docx).
     raise HTTPException(status_code=501, detail=f"Handler para {current_step.value} ainda não implementado")
 
 

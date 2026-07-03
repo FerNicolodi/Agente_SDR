@@ -64,11 +64,25 @@ def score_authority(cargo_categoria: str) -> int:
     return WEIGHTS["authority"].get(cargo_categoria, WEIGHTS["authority"]["nao_identificado"])
 
 
-def adjust_authority_m4(score_a: int, ajuste: str | None) -> int:
-    """Aplica o ajuste da Mensagem 4 (autonomia real confirmada em conversa)."""
+_CARGOS_INTERMEDIARIOS = {"gerente_arquiteto", "tech_lead_dev_senior", "gerente_projetos_pmo"}
+
+
+def adjust_authority_m4(score_a: int, ajuste: str | None, cargo_categoria: str | None = None) -> int:
+    """Aplica o ajuste da Mensagem 4 (autonomia real confirmada em conversa).
+
+    O código "autonomia_total" só classifica O QUE O LEAD DISSE (decide
+    sozinho, sem mencionar mais ninguém) — o extrator de sinal não precisa
+    (nem deve) saber o cargo pra escolher esse código, isso só confundia o
+    modelo. A condição de negócio "bônus só se cargo for intermediário"
+    (Score BANT DGS, seção 4) é aplicada aqui, com o cargo que o backend já
+    tem do formulário, não pelo LLM.
+    """
     if not ajuste:
         return score_a
-    delta = WEIGHTS["authority"]["ajuste_m4"].get(ajuste, 0)
+    if ajuste == "autonomia_total":
+        delta = WEIGHTS["authority"]["ajuste_m4"]["autonomia_total"] if cargo_categoria in _CARGOS_INTERMEDIARIOS else 0
+    else:
+        delta = WEIGHTS["authority"]["ajuste_m4"].get(ajuste, 0)
     return max(0, score_a + delta)
 
 
@@ -147,7 +161,7 @@ def compute_score(
     um resultado HOT/WARM (ver Especificação Técnica, seção 2 do Score BANT)."""
     b_pts, porte, bonus = score_budget(faturamento_anual, budget_aprovado, lucro_real)
     a_pts = score_authority(cargo_categoria)
-    a_pts = adjust_authority_m4(a_pts, ajuste_autoridade_m4)
+    a_pts = adjust_authority_m4(a_pts, ajuste_autoridade_m4, cargo_categoria)
     n1_pts, n1_oferta = score_n1(setor_categoria)
     n2_pts, n2_ofertas = score_n2(n2_signal_codes)
     n3_pts, n3_ofertas = score_n3(n3_signal_codes)

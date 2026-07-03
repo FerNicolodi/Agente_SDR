@@ -124,7 +124,7 @@ STEP_VALID_CODES = {
     AVStep.M2_ENVIADA: [k for k in WEIGHTS["n2_sinais_dor"] if k != "cap"],
     AVStep.M3_ENVIADA: list(WEIGHTS["timeline"]),
     AVStep.M4_ENVIADA: [
-        "autonomia_total_cargo_intermediario",
+        "autonomia_total",
         "aprovacao_ceo_cfo",
         "tecnico_sem_cto_no_cargo",
         "comite_avaliacao",
@@ -273,7 +273,7 @@ def run(persona: LeadProfile, interactive: bool) -> None:
 
         elif step == AVStep.M4_ENVIADA:
             ajuste = codigos[0] if codigos else None
-            score["a"] = adjust_authority_m4(score["a"], ajuste)
+            score["a"] = adjust_authority_m4(score["a"], ajuste, persona.cargo_categoria)
             step = transitions.next_step_after_m4()
             send(messages.M5_FIT_BUDGET, transcript)
 

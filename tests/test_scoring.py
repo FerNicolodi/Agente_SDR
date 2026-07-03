@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.scoring.rules import compute_score, tier_from_score
+from src.scoring.rules import adjust_authority_m4, compute_score, tier_from_score
 from src.scoring.disqualifiers import DisqualifierFlags, check_disqualifiers
 
 
@@ -60,6 +60,15 @@ def test_desqualificador_d5_bloqueia_independente_do_score():
     assert resultado.desqualificado is True
     assert resultado.codigos == ["D5"]
     assert tier_from_score(96, desqualificado=resultado.desqualificado) == "DESQUALIFICADO"
+
+
+def test_bonus_autonomia_total_so_vale_para_cargo_intermediario():
+    """O código autonomia_total só classifica o que o lead disse ("decido
+    sozinho"); o bônus de +2 pts depende do cargo do formulário, não da
+    resposta em si (Score BANT DGS, seção 4)."""
+    assert adjust_authority_m4(9, "autonomia_total", "gerente_arquiteto") == 11
+    assert adjust_authority_m4(15, "autonomia_total", "cto_vp_head_ti") == 15  # CTO já no máximo, sem bônus
+    assert adjust_authority_m4(5, "tecnico_sem_cto_no_cargo", "tech_lead_dev_senior") == 2
 
 
 def test_lead_abaixo_do_icp_sem_sinais():

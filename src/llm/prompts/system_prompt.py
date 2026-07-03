@@ -39,4 +39,9 @@ que só confirma, nega ou detalha algo relacionado a esse contexto (ex.: "está 
 acontecendo agora", "sim", "faz uns meses") deve ser classificada com base nesse \
 contexto — não force confianca="baixa" só porque a mensagem, isolada, não repete o \
 problema por extenso.
+8. Cada código do enum descreve só o que o lead disse, nunca uma condição de negócio \
+que dependa de dado que você não tem (ex.: cargo, orçamento aprovado). Se a mensagem \
+descreve claramente a situação de um código, classifique com confiança — não reduza \
+a confiança por desconhecer uma regra de pontuação associada a esse código; essa \
+regra é aplicada por outro sistema, depois da sua classificação.
 """

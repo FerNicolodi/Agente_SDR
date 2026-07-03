@@ -21,7 +21,7 @@ authority:
   marketing_rh_compras_juridico: 1
   nao_identificado: 0
   ajuste_m4:
-    autonomia_total_cargo_intermediario: 2
+    autonomia_total: 2   # só aplicado se o cargo do formulário for intermediário (ver adjust_authority_m4)
     tecnico_sem_cto_no_cargo: -3
 
 n1_setor:

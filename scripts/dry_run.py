@@ -45,6 +45,7 @@ from src.scoring.rules import (
     score_n1,
     score_n2,
     score_timeline,
+    setor_label,
     tier_from_score,
 )
 from src.state_machine import transitions
@@ -209,6 +210,11 @@ def run(persona: LeadProfile, interactive: bool) -> None:
             if step == AVStep.FECHAMENTO_HOT:
                 send(messages.M6_FECHAMENTO_HOT_DIRETO)
                 print("\n[SCORE FINAL] Fechamento HOT direto — lead pulou a qualificação, pediu contato imediato.")
+                horario = get_reply(reply_queue, interactive)
+                if horario:
+                    print(f"[SISTEMA] Horário preferencial registrado no HubSpot: \"{horario}\". "
+                          "Sem link automático de agenda — o Closer usa isso como referência pra ligar "
+                          "(Script_Atendente_Virtual_DGS.docx não prevê agendamento automatizado hoje).")
                 return
             send(messages.M2_DOR_PRINCIPAL.format(trecho_desafios=persona.trecho_desafios))
 
@@ -249,13 +255,18 @@ def run(persona: LeadProfile, interactive: bool) -> None:
                 send(messages.M6_FECHAMENTO_HOT.format(nome=persona.nome))
                 step = AVStep.FECHAMENTO_HOT
             elif tier == "WARM":
-                send(messages.M6_FECHAMENTO_WARM.format(nome=persona.nome, setor=persona.setor_categoria))
+                send(messages.M6_FECHAMENTO_WARM.format(nome=persona.nome, setor=setor_label(persona.setor_categoria)))
                 step = AVStep.FECHAMENTO_WARM
+                horario = get_reply(reply_queue, interactive)
+                if horario:
+                    print(f"[SISTEMA] Horário preferencial registrado no HubSpot: \"{horario}\". "
+                          "Sem link automático de agenda — o Closer usa isso como referência pra ligar em 1-2 "
+                          "dias úteis (Script_Atendente_Virtual_DGS.docx não prevê agendamento automatizado hoje).")
             elif tier == "TEPID":
-                send(messages.M6_FECHAMENTO_TEPID.format(nome=persona.nome, setor=persona.setor_categoria))
+                send(messages.M6_FECHAMENTO_TEPID.format(nome=persona.nome, setor=setor_label(persona.setor_categoria)))
                 step = AVStep.FECHAMENTO_TEPID
             else:
-                send(messages.M6_FECHAMENTO_COLD.format(nome=persona.nome, tema=persona.setor_categoria))
+                send(messages.M6_FECHAMENTO_COLD.format(nome=persona.nome, tema=setor_label(persona.setor_categoria)))
                 step = AVStep.FECHAMENTO_COLD
 
     print("\n[FIM] Conversa encerrada.")

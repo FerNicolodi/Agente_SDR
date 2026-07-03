@@ -26,14 +26,14 @@ authority:
 
 n1_setor:
   cap: 15
-  finance_tradicional: { pts: 15, oferta: "Legado ASE + Open Finance" }
-  construcao_imobiliario: { pts: 15, oferta: "Core Up + Legado" }
-  educacao: { pts: 12, oferta: "Core Up + Tech Talent" }
-  industria_manufatura_agro: { pts: 12, oferta: "Legado + Tech Talent" }
-  varejo_core_proprietario: { pts: 12, oferta: "Core Up + Open Finance" }
-  saude_utilities_governo: { pts: 8, oferta: "Core Up + Legado" }
-  fintech_scale_up_complementar: { pts: 6, oferta: "Open Finance / Agentic Squad" }
-  tech_native_sem_projeto: { pts: 0, oferta: "Desqualificar" }
+  finance_tradicional: { pts: 15, oferta: "Legado ASE + Open Finance", label: "Finance Tradicional" }
+  construcao_imobiliario: { pts: 15, oferta: "Core Up + Legado", label: "Construção/Imobiliário" }
+  educacao: { pts: 12, oferta: "Core Up + Tech Talent", label: "Educação" }
+  industria_manufatura_agro: { pts: 12, oferta: "Legado + Tech Talent", label: "Indústria/Manufatura/Agronegócio" }
+  varejo_core_proprietario: { pts: 12, oferta: "Core Up + Open Finance", label: "Varejo" }
+  saude_utilities_governo: { pts: 8, oferta: "Core Up + Legado", label: "Saúde/Utilities/Governo" }
+  fintech_scale_up_complementar: { pts: 6, oferta: "Open Finance / Agentic Squad", label: "Fintech/Scale-up" }
+  tech_native_sem_projeto: { pts: 0, oferta: "Desqualificar", label: "Tech Native" }
 
 n2_sinais_dor:
   cap: 15

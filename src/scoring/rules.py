@@ -80,6 +80,13 @@ def score_n1(setor_categoria: str) -> tuple[int, str]:
     return entry["pts"], entry["oferta"]
 
 
+def setor_label(setor_categoria: str) -> str:
+    """Rótulo legível do setor (para uso em mensagens ao lead — nunca expor o
+    código interno, ex.: 'finance_tradicional', diretamente na conversa)."""
+    entry = WEIGHTS["n1_setor"].get(setor_categoria)
+    return entry["label"] if entry else setor_categoria
+
+
 def _score_signals_capped(signal_codes: list[str], table: dict, cap: int) -> tuple[int, list[str]]:
     total = 0
     ofertas = []

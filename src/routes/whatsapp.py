@@ -86,7 +86,10 @@ async def receive_whatsapp_message(request: Request):
         )
         return {"status": "escalated_no_handler"}
 
-    signal = extract_signal(lead_message, valid_codes, step_context=current_step.value)
+    desafios = contact["properties"].get("desafios", "")
+    signal = extract_signal(
+        lead_message, valid_codes, step_context=current_step.value, extra_context=desafios
+    )
 
     if signal["pergunta_sobre_natureza_virtual"]:
         # Não é injeção — a Alana responde com honestidade e o fluxo continua
@@ -108,8 +111,7 @@ async def receive_whatsapp_message(request: Request):
     if current_step == AVStep.M1_ENVIADA:
         next_step = transitions.next_step_after_m1(codigos)
         if next_step == AVStep.M2_ENVIADA:
-            trecho = contact["properties"].get("desafios", "")
-            await whatsapp_client.send_text(phone, messages.M2_DOR_PRINCIPAL.format(trecho_desafios=trecho))
+            await whatsapp_client.send_text(phone, messages.M2_DOR_PRINCIPAL.format(trecho_desafios=desafios))
         await hubspot_client.upsert_contact(
             email=contact["properties"]["email"], properties={"av_current_step": next_step.value}
         )

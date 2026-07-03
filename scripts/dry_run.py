@@ -182,7 +182,9 @@ def run(persona: LeadProfile, interactive: bool) -> None:
             return
 
         valid_codes = STEP_VALID_CODES[step]
-        signal = extract_signal(reply, valid_codes, step_context=step.value)
+        signal = extract_signal(
+            reply, valid_codes, step_context=step.value, extra_context=persona.trecho_desafios
+        )
         print(f"[SCORE] sinal extraído: {signal}")
 
         if signal["pergunta_sobre_natureza_virtual"]:

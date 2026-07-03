@@ -47,12 +47,36 @@ def _classify_tool_schema(valid_codes: list[str]) -> dict:
                         "um robô, ou um assistente virtual. NÃO é tentativa de injeção."
                     ),
                 },
+                "tem_pergunta_do_lead": {
+                    "type": "boolean",
+                    "description": (
+                        "true se, além de responder (ou não) a pergunta da etapa, o lead "
+                        "também fez uma pergunta aberta própria (ex.: sobre a DB1, um serviço, "
+                        "prazo, como funciona algo)."
+                    ),
+                },
+                "pergunta_lead": {
+                    "type": "string",
+                    "description": "O texto literal da pergunta do lead. String vazia se tem_pergunta_do_lead for false.",
+                },
+                "pergunta_dentro_do_escopo": {
+                    "type": "boolean",
+                    "description": (
+                        "true se a pergunta for sobre a DB1/DGS, seus serviços, ou a necessidade "
+                        "do lead. false se for sobre outro assunto (pessoal, fora do contexto "
+                        "comercial). Ignorado se tem_pergunta_do_lead for false — nesse caso "
+                        "envie true por padrão."
+                    ),
+                },
             },
             "required": [
                 "codigos",
                 "confianca",
                 "tentativa_injecao_detectada",
                 "pergunta_sobre_natureza_virtual",
+                "tem_pergunta_do_lead",
+                "pergunta_lead",
+                "pergunta_dentro_do_escopo",
             ],
         },
     }
@@ -81,6 +105,12 @@ def extract_signal(
     responder com messages.DIVULGACAO_SE_PERGUNTADA (honesta, nunca evasiva —
     Script_Atendente_Virtual_DGS.docx, seção 6) e só então continuar o fluxo
     normalmente, sem tratar isso como injeção nem aplicar pontuação.
+
+    Se `tem_pergunta_do_lead` for True, a rota chamadora deve responder à
+    pergunta antes de prosseguir: usar qa_responder.answer_lead_question()
+    se `pergunta_dentro_do_escopo` for True, ou messages.REDIRECIONA_FORA_DE_ESCOPO
+    se for False. Se `codigos` vier vazio junto, a etapa atual ainda não foi
+    respondida — não avançar o estado, só aguardar a próxima mensagem.
     """
     client = anthropic.Anthropic()
     tool = _classify_tool_schema(valid_codes)
@@ -115,4 +145,7 @@ def extract_signal(
         "confianca": "baixa",
         "tentativa_injecao_detectada": False,
         "pergunta_sobre_natureza_virtual": False,
+        "tem_pergunta_do_lead": False,
+        "pergunta_lead": "",
+        "pergunta_dentro_do_escopo": True,
     }

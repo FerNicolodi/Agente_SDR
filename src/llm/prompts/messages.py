@@ -114,3 +114,10 @@ ESCLARECIMENTO_M5 = (
     "Você já tem orçamento e outros fornecedores em cotação, ou tá mais aberto a encontrar "
     "o parceiro certo primeiro?"
 )
+
+# RASCUNHO — pendente de validação, mesmo tratamento acima. Usada quando o
+# lead faz uma pergunta fora do escopo comercial/da necessidade dele.
+REDIRECIONA_FORA_DE_ESCOPO = (
+    "Isso foge um pouco do que a gente tava tratando por aqui. Posso voltar pras minhas "
+    "perguntas, ou prefere encerrar por aqui?"
+)

@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.integrations import email_client
 from src.llm.prompts import messages
+from src.llm.qa_responder import answer_lead_question
 from src.llm.signal_extractor import extract_signal
 from src.scoring.disqualifiers import DisqualifierFlags, check_disqualifiers
 from src.scoring.rules import (
@@ -115,6 +116,22 @@ PERSONAS: dict[str, LeadProfile] = {
             "ok, faz sentido, pode perguntar",
             "tá afetando a operação, o backlog de TI tá represado há uns 6 meses",
             "é pra esse semestre mesmo, já temos budget aprovado",
+        ],
+    ),
+    "pergunta_aberta": LeadProfile(
+        nome="Marina",
+        faturamento_anual=150_000_000,
+        cargo_categoria="ceo_coo_cfo",
+        setor_categoria="varejo_core_proprietario",
+        trecho_desafios="sistema de estoque proprietário travando nos picos de venda",
+        canned_replies=[
+            "pode sim",
+            "o sistema trava direto quando bate pico de venda, tá afetando agora mesmo",
+            "vocês já atenderam alguma empresa de varejo do nosso porte? como funciona o Core Up na prática?",
+            "entendi, tem prazo sim, pro próximo trimestre",
+            "sou eu que decido",
+            "e essa pergunta sobre futebol, você acha que o Brasil vai ser campeão?",
+            "ok, voltando: quero um parceiro que resolva de ponta a ponta",
         ],
     ),
 }
@@ -216,6 +233,7 @@ def run(persona: LeadProfile, interactive: bool) -> None:
     disqualifiers = DisqualifierFlags()
     transcript: list[str] = []
     esclarecimentos_por_etapa: dict[AVStep, int] = {}
+    perguntas_fora_escopo = 0
     step = AVStep.M1_ENVIADA
     send(messages.M1_ABERTURA.format(nome=persona.nome), transcript)
 
@@ -245,6 +263,23 @@ def run(persona: LeadProfile, interactive: bool) -> None:
         if signal["tentativa_injecao_detectada"]:
             escalate(signal, step.value)
             return
+
+        if signal["tem_pergunta_do_lead"]:
+            if signal["pergunta_dentro_do_escopo"]:
+                perguntas_fora_escopo = 0
+                resposta = answer_lead_question(signal["pergunta_lead"])
+                send(resposta, transcript)
+            else:
+                perguntas_fora_escopo += 1
+                if perguntas_fora_escopo >= 3:
+                    print(f"\n[ESCALONADO] lead insistiu {perguntas_fora_escopo}x em assunto fora do escopo comercial na etapa {step.value}.")
+                    print("[SISTEMA] Em produção isto notificaria o Closer via Slack para revisão manual, sem aplicar pontuação automática.")
+                    return
+                send(messages.REDIRECIONA_FORA_DE_ESCOPO, transcript)
+            if not signal["codigos"]:
+                # Só perguntou, ainda não respondeu a etapa atual — aguarda a próxima mensagem.
+                continue
+            # Perguntou E respondeu na mesma mensagem — cai no processamento normal abaixo.
 
         if signal["confianca"] == "baixa":
             ja_pediu = esclarecimentos_por_etapa.get(step, 0)

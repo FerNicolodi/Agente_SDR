@@ -119,6 +119,13 @@ PERSONAS: dict[str, LeadProfile] = {
     ),
 }
 
+CLARIFICATION_BY_STEP = {
+    AVStep.M2_ENVIADA: messages.ESCLARECIMENTO_M2,
+    AVStep.M3_ENVIADA: messages.ESCLARECIMENTO_M3,
+    AVStep.M4_ENVIADA: messages.ESCLARECIMENTO_M4,
+    AVStep.M5_ENVIADA: messages.ESCLARECIMENTO_M5,
+}
+
 STEP_VALID_CODES = {
     AVStep.M1_ENVIADA: ["afirmativo", "pediu_ligacao_direta", "sem_tempo_agora"],
     AVStep.M2_ENVIADA: [k for k in WEIGHTS["n2_sinais_dor"] if k != "cap"],
@@ -208,6 +215,7 @@ def run(persona: LeadProfile, interactive: bool) -> None:
     score = {"b": b_pts, "a": a_pts, "n1": n1_pts, "n2": 0, "n3": 0, "t": 0, "bonus": 0}
     disqualifiers = DisqualifierFlags()
     transcript: list[str] = []
+    esclarecimentos_por_etapa: dict[AVStep, int] = {}
     step = AVStep.M1_ENVIADA
     send(messages.M1_ABERTURA.format(nome=persona.nome), transcript)
 
@@ -234,7 +242,17 @@ def run(persona: LeadProfile, interactive: bool) -> None:
             print("[SISTEMA] Não é tratado como injeção nem pontuado — a conversa continua na mesma etapa.")
             continue
 
-        if signal["tentativa_injecao_detectada"] or signal["confianca"] == "baixa":
+        if signal["tentativa_injecao_detectada"]:
+            escalate(signal, step.value)
+            return
+
+        if signal["confianca"] == "baixa":
+            ja_pediu = esclarecimentos_por_etapa.get(step, 0)
+            if ja_pediu == 0 and step in CLARIFICATION_BY_STEP:
+                esclarecimentos_por_etapa[step] = 1
+                send(CLARIFICATION_BY_STEP[step], transcript)
+                print("[SISTEMA] Baixa confiança — pedindo esclarecimento com outras palavras antes de escalar (1ª tentativa nesta etapa).")
+                continue
             escalate(signal, step.value)
             return
 

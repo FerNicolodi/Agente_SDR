@@ -48,6 +48,16 @@ STEP_VALID_CODES = {
     ),
 }
 
+# Etapas onde vale pedir esclarecimento (com outras palavras) antes de
+# escalar por baixa confiança — só uma vez por etapa. av_esclarecimento_count
+# no HubSpot guarda quantas vezes isso já foi feito na etapa atual, e é
+# zerado sempre que o lead avança de etapa (ver upserts abaixo). M1 não
+# entra aqui: as respostas possíveis lá são simples o bastante pra não
+# precisarem desse tratamento.
+CLARIFICATION_BY_STEP = {
+    AVStep.M2_ENVIADA: messages.ESCLARECIMENTO_M2,
+}
+
 
 @router.get("/webhook/whatsapp")
 async def verify_webhook(request: Request):
@@ -98,13 +108,26 @@ async def receive_whatsapp_message(request: Request):
         await whatsapp_client.send_text(phone, messages.DIVULGACAO_SE_PERGUNTADA)
         return {"status": "disclosed_virtual_nature"}
 
-    if signal["tentativa_injecao_detectada"] or signal["confianca"] == "baixa":
-        if signal["tentativa_injecao_detectada"]:
-            motivo = "possível tentativa de manipulação (mensagem tentou instruir o assistente a mudar de comportamento)"
-        else:
-            motivo = "resposta ambígua, sem confiança suficiente para classificar — sem indício de má-fé do lead"
+    if signal["tentativa_injecao_detectada"]:
         await slack_client.notify_closer(
-            f"[Agente SDR] Revisão manual necessária no lead {contact['id']} (etapa {current_step.value}): {motivo}."
+            f"[Agente SDR] Revisão manual necessária no lead {contact['id']} (etapa {current_step.value}): "
+            f"possível tentativa de manipulação (mensagem tentou instruir o assistente a mudar de comportamento)."
+        )
+        return {"status": "escalated_low_confidence"}
+
+    if signal["confianca"] == "baixa":
+        ja_pediu = int(contact["properties"].get("av_esclarecimento_count") or 0)
+        clarification = CLARIFICATION_BY_STEP.get(current_step)
+        if ja_pediu == 0 and clarification:
+            await whatsapp_client.send_text(phone, clarification)
+            await hubspot_client.upsert_contact(
+                email=contact["properties"]["email"],
+                properties={"av_esclarecimento_count": 1},
+            )
+            return {"status": "clarification_requested"}
+        await slack_client.notify_closer(
+            f"[Agente SDR] Revisão manual necessária no lead {contact['id']} (etapa {current_step.value}): "
+            f"resposta ambígua mesmo após pedir esclarecimento — sem indício de má-fé do lead."
         )
         return {"status": "escalated_low_confidence"}
 
@@ -115,14 +138,20 @@ async def receive_whatsapp_message(request: Request):
         if next_step == AVStep.M2_ENVIADA:
             await whatsapp_client.send_text(phone, messages.M2_DOR_PRINCIPAL.format(trecho_desafios=desafios))
         await hubspot_client.upsert_contact(
-            email=contact["properties"]["email"], properties={"av_current_step": next_step.value}
+            email=contact["properties"]["email"],
+            properties={"av_current_step": next_step.value, "av_esclarecimento_count": 0},
         )
         return {"status": "ok", "next_step": next_step.value}
 
     if current_step == AVStep.M2_ENVIADA:
         n2_pts, n2_ofertas = score_n2(codigos)
         next_step = transitions.next_step_after_m2(codigos)
-        properties = {"score_n2": n2_pts, "n2_signal": ",".join(codigos), "av_current_step": next_step.value}
+        properties = {
+            "score_n2": n2_pts,
+            "n2_signal": ",".join(codigos),
+            "av_current_step": next_step.value,
+            "av_esclarecimento_count": 0,
+        }
         if n2_ofertas:
             properties["oferta_recomendada"] = n2_ofertas[0]
         await hubspot_client.upsert_contact(email=contact["properties"]["email"], properties=properties)

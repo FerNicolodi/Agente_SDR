@@ -89,3 +89,28 @@ DETECCAO_D5_PRECO = (
     "é em projetos onde o parceiro técnico faz diferença no resultado. Se em algum momento isso "
     "mudar, a gente fica por aqui. Até mais, {nome}!"
 )
+
+# RASCUNHO — ainda não estão no Script_Atendente_Virtual_DGS.docx aprovado.
+# Usadas quando a resposta do lead vem ambígua: em vez de escalar direto pro
+# Closer, a Alana pergunta de novo com outras palavras (uma vez só por
+# etapa). Pendente de validação de texto por Fernando antes de ir pra
+# produção (mesmo tratamento do system_prompt.py).
+ESCLARECIMENTO_M2 = (
+    "Me conta um pouco mais: isso já tá impactando o dia a dia agora, ou é mais uma coisa "
+    "pra resolver lá na frente?"
+)
+
+ESCLARECIMENTO_M3 = (
+    "Você já tem uma data ou prazo mais ou menos definido pra resolver isso, ou ainda tá "
+    "em fase de avaliação?"
+)
+
+ESCLARECIMENTO_M4 = (
+    "Só confirmando: tem mais alguém além de você que participa dessa decisão, ou é só "
+    "você mesmo quem decide?"
+)
+
+ESCLARECIMENTO_M5 = (
+    "Você já tem orçamento e outros fornecedores em cotação, ou tá mais aberto a encontrar "
+    "o parceiro certo primeiro?"
+)

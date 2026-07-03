@@ -28,12 +28,14 @@ Uso:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from src.integrations import email_client
 from src.llm.prompts import messages
 from src.llm.signal_extractor import extract_signal
 from src.scoring.disqualifiers import DisqualifierFlags, check_disqualifiers
@@ -136,22 +138,50 @@ STEP_VALID_CODES = {
 }
 
 
-def send(text: str) -> None:
+def send(text: str, transcript: list[str]) -> None:
     print(f"\n[ALANA]  {text}")
+    transcript.append(f"Alana: {text}")
 
 
-def get_reply(reply_queue: list[str], interactive: bool) -> str | None:
+def get_reply(reply_queue: list[str], interactive: bool, transcript: list[str]) -> str | None:
     if interactive:
         try:
-            return input("[LEAD] > ").strip()
+            reply = input("[LEAD] > ").strip()
         except EOFError:
             return None
-    return reply_queue.pop(0) if reply_queue else None
+    else:
+        reply = reply_queue.pop(0) if reply_queue else None
+    if reply:
+        transcript.append(f"Lead: {reply}")
+    return reply
 
 
 def escalate(motivo: str) -> None:
     print(f"\n[ESCALONADO] {motivo}")
     print("[SISTEMA] Em produção isto notificaria o Closer via Slack para revisão manual, sem aplicar pontuação automática.")
+
+
+def notify_scheduled_meeting(persona: LeadProfile, tier: str, horario: str, transcript: list[str]) -> None:
+    """Envia (ou, sem SMTP configurado, só exibe) o e-mail de notificação
+    interna com o horário informado pelo lead e a transcrição completa da
+    conversa — pedido explícito para fechar o loop do agendamento sem link
+    automático de agenda."""
+    subject = f"Novo horário de reunião — {persona.nome} ({tier})"
+    body = (
+        f"Lead: {persona.nome}\n"
+        f"Tier: {tier}\n"
+        f"Horário informado pelo lead: {horario}\n\n"
+        f"--- Transcrição da conversa ---\n" + "\n".join(transcript)
+    )
+    try:
+        email_client.send_email(subject=subject, body=body)
+        print(f"[SISTEMA] E-mail de notificação enviado para {os.environ.get('NOTIFICATION_EMAIL_TO', email_client.DEFAULT_NOTIFICATION_EMAIL)}.")
+    except KeyError as exc:
+        print(f"[SISTEMA] SMTP não configurado ({exc} ausente no ambiente) — e-mail NÃO enviado. Prévia do que seria enviado:")
+        print(f"  Assunto: {subject}")
+        print(f"  Corpo:\n{body}")
+    except Exception as exc:  # smtplib pode levantar várias exceções distintas
+        print(f"[SISTEMA] Falha ao enviar e-mail via SMTP: {exc}")
 
 
 def run(persona: LeadProfile, interactive: bool) -> None:
@@ -167,8 +197,9 @@ def run(persona: LeadProfile, interactive: bool) -> None:
 
     score = {"b": b_pts, "a": a_pts, "n1": n1_pts, "n2": 0, "n3": 0, "t": 0, "bonus": 0}
     disqualifiers = DisqualifierFlags()
+    transcript: list[str] = []
     step = AVStep.M1_ENVIADA
-    send(messages.M1_ABERTURA.format(nome=persona.nome))
+    send(messages.M1_ABERTURA.format(nome=persona.nome), transcript)
 
     while step not in (
         AVStep.FECHAMENTO_HOT,
@@ -177,7 +208,7 @@ def run(persona: LeadProfile, interactive: bool) -> None:
         AVStep.FECHAMENTO_COLD,
         AVStep.FECHAMENTO_DESQUALIFICADO,
     ):
-        reply = get_reply(reply_queue, interactive)
+        reply = get_reply(reply_queue, interactive, transcript)
         if reply is None:
             print("\n[SISTEMA] Sem mais respostas — fim da simulação.")
             return
@@ -189,7 +220,7 @@ def run(persona: LeadProfile, interactive: bool) -> None:
         print(f"[SCORE] sinal extraído: {signal}")
 
         if signal["pergunta_sobre_natureza_virtual"]:
-            send(messages.DIVULGACAO_SE_PERGUNTADA)
+            send(messages.DIVULGACAO_SE_PERGUNTADA, transcript)
             print("[SISTEMA] Não é tratado como injeção nem pontuado — a conversa continua na mesma etapa.")
             continue
 
@@ -208,34 +239,33 @@ def run(persona: LeadProfile, interactive: bool) -> None:
                 return
             step = transitions.next_step_after_m1(codigos)
             if step == AVStep.FECHAMENTO_HOT:
-                send(messages.M6_FECHAMENTO_HOT_DIRETO)
+                send(messages.M6_FECHAMENTO_HOT_DIRETO, transcript)
                 print("\n[SCORE FINAL] Fechamento HOT direto — lead pulou a qualificação, pediu contato imediato.")
-                horario = get_reply(reply_queue, interactive)
+                horario = get_reply(reply_queue, interactive, transcript)
                 if horario:
-                    print(f"[SISTEMA] Horário preferencial registrado no HubSpot: \"{horario}\". "
-                          "Sem link automático de agenda — o Closer usa isso como referência pra ligar "
-                          "(Script_Atendente_Virtual_DGS.docx não prevê agendamento automatizado hoje).")
+                    send(messages.CONFIRMACAO_AGENDAMENTO, transcript)
+                    notify_scheduled_meeting(persona, "HOT direto", horario, transcript)
                 return
-            send(messages.M2_DOR_PRINCIPAL.format(trecho_desafios=persona.trecho_desafios))
+            send(messages.M2_DOR_PRINCIPAL.format(trecho_desafios=persona.trecho_desafios), transcript)
 
         elif step == AVStep.M2_ENVIADA:
             score["n2"], ofertas = score_n2(codigos)
             step = transitions.next_step_after_m2(codigos)
             if step == AVStep.M4_ENVIADA:
-                send(messages.M4_AUTORIDADE)
+                send(messages.M4_AUTORIDADE, transcript)
             else:
-                send(messages.M3_TIMELINE)
+                send(messages.M3_TIMELINE, transcript)
 
         elif step == AVStep.M3_ENVIADA:
             score["t"] = score_timeline(codigos[0]) if codigos else 0
             step = transitions.next_step_after_m3()
-            send(messages.M4_AUTORIDADE)
+            send(messages.M4_AUTORIDADE, transcript)
 
         elif step == AVStep.M4_ENVIADA:
             ajuste = codigos[0] if codigos else None
             score["a"] = adjust_authority_m4(score["a"], ajuste)
             step = transitions.next_step_after_m4()
-            send(messages.M5_FIT_BUDGET)
+            send(messages.M5_FIT_BUDGET, transcript)
 
         elif step == AVStep.M5_ENVIADA:
             if "preco_licitacao_d5" in codigos:
@@ -249,24 +279,32 @@ def run(persona: LeadProfile, interactive: bool) -> None:
 
             print(f"\n[SCORE FINAL] {score} | total={total} | tier={tier}")
             if resultado_d.desqualificado:
-                send(messages.DETECCAO_D5_PRECO.format(nome=persona.nome))
+                send(messages.DETECCAO_D5_PRECO.format(nome=persona.nome), transcript)
                 step = AVStep.FECHAMENTO_DESQUALIFICADO
             elif tier == "HOT":
-                send(messages.M6_FECHAMENTO_HOT.format(nome=persona.nome))
+                send(messages.M6_FECHAMENTO_HOT.format(nome=persona.nome), transcript)
                 step = AVStep.FECHAMENTO_HOT
             elif tier == "WARM":
-                send(messages.M6_FECHAMENTO_WARM.format(nome=persona.nome, setor=setor_label(persona.setor_categoria)))
+                send(
+                    messages.M6_FECHAMENTO_WARM.format(nome=persona.nome, setor=setor_label(persona.setor_categoria)),
+                    transcript,
+                )
                 step = AVStep.FECHAMENTO_WARM
-                horario = get_reply(reply_queue, interactive)
+                horario = get_reply(reply_queue, interactive, transcript)
                 if horario:
-                    print(f"[SISTEMA] Horário preferencial registrado no HubSpot: \"{horario}\". "
-                          "Sem link automático de agenda — o Closer usa isso como referência pra ligar em 1-2 "
-                          "dias úteis (Script_Atendente_Virtual_DGS.docx não prevê agendamento automatizado hoje).")
+                    send(messages.CONFIRMACAO_AGENDAMENTO, transcript)
+                    notify_scheduled_meeting(persona, tier, horario, transcript)
             elif tier == "TEPID":
-                send(messages.M6_FECHAMENTO_TEPID.format(nome=persona.nome, setor=setor_label(persona.setor_categoria)))
+                send(
+                    messages.M6_FECHAMENTO_TEPID.format(nome=persona.nome, setor=setor_label(persona.setor_categoria)),
+                    transcript,
+                )
                 step = AVStep.FECHAMENTO_TEPID
             else:
-                send(messages.M6_FECHAMENTO_COLD.format(nome=persona.nome, tema=setor_label(persona.setor_categoria)))
+                send(
+                    messages.M6_FECHAMENTO_COLD.format(nome=persona.nome, tema=setor_label(persona.setor_categoria)),
+                    transcript,
+                )
                 step = AVStep.FECHAMENTO_COLD
 
     print("\n[FIM] Conversa encerrada.")

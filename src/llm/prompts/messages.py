@@ -53,6 +53,8 @@ M6_FECHAMENTO_WARM = (
     "desafio. Tem algum horário que funciona melhor pra você essa semana?"
 )
 
+CONFIRMACAO_AGENDAMENTO = "Perfeito! Vou te enviar o invite na sequência. Obrigada e ótimo dia!"
+
 M6_FECHAMENTO_TEPID = (
     "{nome}, faz sentido! Vou pedir para nosso time te mandar alguns conteúdos sobre como "
     "empresas do setor de {setor} estão resolvendo esse desafio. Se fizer sentido pra você, "

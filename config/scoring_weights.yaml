@@ -45,10 +45,14 @@ n2_sinais_dor:
   vaga_senior_aberta: { pts: 9, oferta: "Tech Talent / Agentic Squad" }
   auditoria_nao_conformidade: { pts: 8, oferta: "Legado ASE" }
   ia_parada_sem_expertise: { pts: 8, oferta: "Agentic Squad" }
+  quer_produto_novo: { pts: 8, oferta: "Produtos Digitais / Product Discovery" }  # v0.6
   novo_cto_recente: { pts: 7, oferta: "Core Up / Assessment" }
+  precisa_integrar_parceiros: { pts: 7, oferta: "Integração de APIs e Sistemas" }  # v0.6
   pressao_concorrente: { pts: 6, oferta: "Core Up + Legado" }
+  precisa_mais_desenvolvedores: { pts: 6, oferta: "Staff Augmentation / Tech Talent" }  # v0.6
   custo_manutencao_crescente: { pts: 5, oferta: "Legado ASE / Core Up" }
   budget_ti_aprovado: { pts: 4, oferta: "Todas as ofertas" }
+  nao_sabe_por_onde_comecar: { pts: 4, oferta: "Assessment" }  # v0.6
 
 n3_tecnografia:
   cap: 10

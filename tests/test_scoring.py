@@ -71,6 +71,18 @@ def test_bonus_autonomia_total_so_vale_para_cargo_intermediario():
     assert adjust_authority_m4(5, "tecnico_sem_cto_no_cargo", "tech_lead_dev_senior") == 2
 
 
+def test_sinais_n2_alem_de_legado_v06():
+    """v0.6: leads que não têm dor de legado (Produtos Digitais, Staff Aug,
+    Assessment, Integração de APIs) também devem pontuar N2 corretamente —
+    esses sinais não existiam nas versões anteriores."""
+    from src.scoring.rules import score_n2
+
+    assert score_n2(["quer_produto_novo"]) == (8, ["Produtos Digitais / Product Discovery"])
+    assert score_n2(["precisa_mais_desenvolvedores"]) == (6, ["Staff Augmentation / Tech Talent"])
+    assert score_n2(["nao_sabe_por_onde_comecar"]) == (4, ["Assessment"])
+    assert score_n2(["precisa_integrar_parceiros"]) == (7, ["Integração de APIs e Sistemas"])
+
+
 def test_lead_abaixo_do_icp_sem_sinais():
     breakdown = compute_score(
         faturamento_anual=10_000_000,

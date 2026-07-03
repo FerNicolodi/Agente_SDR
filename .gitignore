@@ -5,3 +5,10 @@ __pycache__/
 .DS_Store
 venv/
 .venv/
+
+# Documentos de negócio e artefatos do Word ficam fora do repo de código
+# (fonte de verdade continua sendo os arquivos locais/Word, não o Git).
+*.docx
+~$*
+fluxo_*.html
+fluxo_*.png

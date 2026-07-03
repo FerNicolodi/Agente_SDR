@@ -26,8 +26,8 @@ M3_TIMELINE = (
 )
 
 M4_AUTORIDADE = (
-    "Pra garantir que nosso especialista venha preparado: você é a pessoa que vai definir "
-    "o parceiro para essa iniciativa, ou tem outras pessoas envolvidas na decisão?"
+    "Pra garantir que nosso especialista venha preparado: além de você, quem mais costuma "
+    "participar dessa decisão?"
 )
 
 M5_FIT_BUDGET = (

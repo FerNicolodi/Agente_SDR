@@ -99,10 +99,12 @@ async def receive_whatsapp_message(request: Request):
         return {"status": "disclosed_virtual_nature"}
 
     if signal["tentativa_injecao_detectada"] or signal["confianca"] == "baixa":
+        if signal["tentativa_injecao_detectada"]:
+            motivo = "possível tentativa de manipulação (mensagem tentou instruir o assistente a mudar de comportamento)"
+        else:
+            motivo = "resposta ambígua, sem confiança suficiente para classificar — sem indício de má-fé do lead"
         await slack_client.notify_closer(
-            f"[Agente SDR] Classificação de baixa confiança ou possível tentativa de "
-            f"manipulação no lead {contact['id']} (etapa {current_step.value}). "
-            f"Revisão manual necessária antes de prosseguir."
+            f"[Agente SDR] Revisão manual necessária no lead {contact['id']} (etapa {current_step.value}): {motivo}."
         )
         return {"status": "escalated_low_confidence"}
 

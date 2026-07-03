@@ -156,7 +156,17 @@ def get_reply(reply_queue: list[str], interactive: bool, transcript: list[str]) 
     return reply
 
 
-def escalate(motivo: str) -> None:
+def escalate(signal: dict, step_value: str) -> None:
+    if signal["tentativa_injecao_detectada"]:
+        motivo = (
+            f"possível tentativa de manipulação detectada na etapa {step_value} "
+            "(a mensagem tentou instruir o assistente a mudar de comportamento ou se autoclassificar)."
+        )
+    else:
+        motivo = (
+            f"resposta ambígua na etapa {step_value} — o classificador não teve confiança suficiente "
+            "para associá-la a um sinal específico. Não há indício de má-fé do lead."
+        )
     print(f"\n[ESCALONADO] {motivo}")
     print("[SISTEMA] Em produção isto notificaria o Closer via Slack para revisão manual, sem aplicar pontuação automática.")
 
@@ -225,7 +235,7 @@ def run(persona: LeadProfile, interactive: bool) -> None:
             continue
 
         if signal["tentativa_injecao_detectada"] or signal["confianca"] == "baixa":
-            escalate(f"classificação de baixa confiança ou tentativa de manipulação detectada na etapa {step.value}.")
+            escalate(signal, step.value)
             return
 
         codigos = signal["codigos"]

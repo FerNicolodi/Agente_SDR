@@ -1,24 +1,32 @@
-"""Callback da Meta Cloud API. Implementa o padrão de orquestração completo
-para M1 e M2 como referência — M3, M4, M5 e M6 seguem exatamente a mesma
-forma (ver STEP_HANDLERS ao final) e ficam para a fase de implementação,
-depois que o texto final do system prompt e os enums de cada etapa forem
-aprovados por Fernando Nicolodi (Especificação Técnica, seções 2 e 9).
+"""Callback da Meta Cloud API — orquestração completa M1-M6.
 
 Fluxo por mensagem recebida:
   1. Verificar assinatura da Meta.
-  2. Recuperar o estado atual do lead no HubSpot (av_current_step) — o
-     backend não guarda nada em memória entre requisições (seção 3).
-  3. Chamar o extrator de sinal (LLM) com os códigos válidos daquela etapa.
-  4. Se o lead perguntar se está falando com uma IA/robô: responder com
-     honestidade (messages.DIVULGACAO_SE_PERGUNTADA) e não aplicar pontuação
-     a essa mensagem. Se baixa confiança ou tentativa de injeção: escalar
-     para humano, não aplicar pontuação automaticamente (seção 10.2).
-  5. Aplicar a pontuação da etapa (scoring/rules.py) e decidir o próximo
-     estado (state_machine/transitions.py).
-  6. Enviar a próxima mensagem e persistir o novo estado no HubSpot.
+  2. Recuperar estado e contexto do lead no HubSpot (backend stateless).
+  3. Chamar o extrator de sinal (LLM — enum fechado, nunca texto livre).
+  4. Tratar casos especiais antes de avançar o estado:
+       a. Pergunta sobre natureza virtual → responde com honestidade, continua.
+       b. Tentativa de injeção → escala para Closer, para aqui.
+       c. Pergunta aberta dentro do escopo → responde via qa_responder (com
+          contexto histórico), depois processa a etapa normalmente se o lead
+          também respondeu; caso contrário aguarda próxima mensagem.
+       d. Mensagem fora do escopo (3x na mesma etapa) → escala para Closer.
+       e. Baixa confiança → pede esclarecimento (1x por etapa) ou escala.
+  5. Aplicar pontuação da etapa (scoring/rules.py — nunca o LLM).
+  6. Gerar próxima mensagem contextualizada (llm/message_composer.py para
+     M3-M5) ou usar copy fixa de messages.py (M1, M2, M6).
+  7. Persistir novo estado e histórico resumido no HubSpot.
+
+Melhorias de fluidez (v0.9):
+  - qa_responder recebe histórico + sinal de dor + cargo — respostas
+    contextualizadas, não genéricas.
+  - M3-M5 geradas pelo message_composer com base no contexto do lead.
+  - av_fora_escopo_count: após 3 desvios de assunto na mesma etapa, escala.
+  - av_historico_resumido: persiste entre requisições para manter contexto.
 """
 from __future__ import annotations
 
+import json
 import os
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -26,11 +34,21 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from ..integrations import hubspot_client, slack_client, whatsapp_client
 from ..lib.logger import get_logger
 from ..lib.security import verify_meta_signature, verify_meta_webhook_challenge
+from ..llm.message_composer import compose_step_message
 from ..llm.prompts import messages
+from ..llm.qa_responder import answer_lead_question
 from ..llm.signal_extractor import extract_signal
-from ..scoring.rules import WEIGHTS, score_n2
+from ..scoring.disqualifiers import DisqualifierFlags, check_disqualifiers
+from ..scoring.rules import (
+    WEIGHTS,
+    adjust_authority_m4,
+    score_n2,
+    score_timeline,
+    setor_label,
+    tier_from_score,
+)
 from ..state_machine import transitions
-from ..state_machine.states import AVStep
+from ..state_machine.states import AVStep, TERMINAL_STEPS
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -38,32 +56,88 @@ logger = get_logger(__name__)
 META_VERIFY_TOKEN = os.environ.get("META_WA_VERIFY_TOKEN", "")
 META_APP_SECRET = os.environ.get("META_APP_SECRET", "")
 
-# Códigos válidos por etapa — usados para forçar o LLM a um enum fechado
-# (Especificação Técnica, seção 9). M3-M6 seguem o mesmo padrão usando as
-# chaves de config/scoring_weights.yaml (timeline, authority.ajuste_m4, etc.).
+# Códigos válidos por etapa — forçam o LLM a um enum fechado
+# (Especificação Técnica, seção 9). Nunca texto livre.
 STEP_VALID_CODES = {
     AVStep.M1_ENVIADA: ["afirmativo", "pediu_ligacao_direta", "sem_tempo_agora"],
-    AVStep.M2_ENVIADA: list(
-        {k for k in WEIGHTS["n2_sinais_dor"] if k != "cap"}
-    ),
+    AVStep.M2_ENVIADA: [k for k in WEIGHTS["n2_sinais_dor"] if k != "cap"],
+    AVStep.M3_ENVIADA: ["critica", "alta", "media", "difusa", "indefinida"],
+    AVStep.M4_ENVIADA: [
+        "autonomia_total",          # decide sozinho, sem mencionar mais ninguém
+        "tecnico_sem_cto_no_cargo", # técnico que age como decisor sem o cargo formal
+        "multiplos_decisores",      # menciona outras pessoas envolvidas
+        "nao_confirmado",           # resposta ambígua sobre nível de autoridade
+    ],
+    AVStep.M5_ENVIADA: [
+        "parceiro_tecnico_budget_aprovado",  # quer parceiro E tem budget aprovado
+        "parceiro_tecnico",                   # quer parceiro, budget não confirmado
+        "cotacao_exclusiva_preco",            # decisão exclusiva por preço → D5
+        "avaliando_indefinido",               # avaliando sem clareza
+    ],
 }
 
-# Etapas onde vale pedir esclarecimento (com outras palavras) antes de
-# escalar por baixa confiança — só uma vez por etapa. av_esclarecimento_count
-# no HubSpot guarda quantas vezes isso já foi feito na etapa atual, e é
-# zerado sempre que o lead avança de etapa (ver upserts abaixo). M1 não
-# entra aqui: as respostas possíveis lá são simples o bastante pra não
-# precisarem desse tratamento.
+# Textos de esclarecimento por etapa (uma segunda chance antes de escalar).
+# M1 excluída — respostas simples o bastante.
 CLARIFICATION_BY_STEP = {
     AVStep.M2_ENVIADA: messages.ESCLARECIMENTO_M2,
+    AVStep.M3_ENVIADA: messages.ESCLARECIMENTO_M3,
+    AVStep.M4_ENVIADA: messages.ESCLARECIMENTO_M4,
+    AVStep.M5_ENVIADA: messages.ESCLARECIMENTO_M5,
 }
 
+# Máximo de desvios de assunto tolerados por etapa antes de escalar.
+_MAX_FORA_ESCOPO = 3
+
+# Máximo de turnos mantidos no histórico compacto.
+_HISTORICO_MAX_TURNS = 10
+
+
+# ---------------------------------------------------------------------------
+# Helpers de histórico
+# ---------------------------------------------------------------------------
+
+def _parse_historico(raw: str | None) -> list[dict]:
+    """Desserializa o JSON compacto do campo av_historico_resumido."""
+    if not raw:
+        return []
+    try:
+        return json.loads(raw)
+    except Exception:
+        return []
+
+
+def _append_turn(historico: list[dict], role: str, text: str) -> list[dict]:
+    """Acrescenta um turno. role: 'a' = Alana, 'l' = lead."""
+    return historico + [{"r": role, "t": text[:300]}]
+
+
+def _serialize_historico(historico: list[dict]) -> str:
+    """Serializa para HubSpot, mantendo só os últimos N turnos."""
+    return json.dumps(
+        historico[-_HISTORICO_MAX_TURNS:],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _props(contact: dict) -> dict:
+    """Atalho para as properties do contact retornado pelo HubSpot."""
+    return contact.get("properties", {})
+
+
+# ---------------------------------------------------------------------------
+# Handlers de webhook
+# ---------------------------------------------------------------------------
 
 @router.get("/webhook/whatsapp")
 async def verify_webhook(request: Request):
     """Handshake de configuração exigido pela Meta ao cadastrar o webhook."""
     params = request.query_params
-    if verify_meta_webhook_challenge(params.get("hub.mode"), params.get("hub.verify_token"), META_VERIFY_TOKEN):
+    if verify_meta_webhook_challenge(
+        params.get("hub.mode"),
+        params.get("hub.verify_token"),
+        META_VERIFY_TOKEN,
+    ):
         return Response(content=params.get("hub.challenge", ""), media_type="text/plain")
     raise HTTPException(status_code=403, detail="Verify token inválido")
 
@@ -78,102 +152,502 @@ async def receive_whatsapp_message(request: Request):
     payload = await request.json()
     phone, lead_message = _parse_meta_payload(payload)
     if phone is None:
-        # Eventos de status (entregue/lido) não têm mensagem de texto — ignorar.
-        return {"status": "ignored"}
+        return {"status": "ignored"}  # evento de status (entregue/lido)
 
     contact = await hubspot_client.find_contact_by_phone(phone)
     if contact is None:
-        logger.info("Mensagem recebida de número não cadastrado — ignorando", extra={"context": {}})
+        logger.info("Mensagem de número não cadastrado — ignorando", extra={"context": {}})
         return {"status": "ignored"}
 
-    current_step = AVStep(contact["properties"]["av_current_step"])
+    p = _props(contact)
+    email = p["email"]
+    current_step = AVStep(p["av_current_step"])
+
+    if current_step in TERMINAL_STEPS:
+        return {"status": "terminal_step"}
+
+    # AGUARDANDO_HORARIO não usa STEP_VALID_CODES — qualquer texto é o horário.
+    if current_step == AVStep.AGUARDANDO_HORARIO:
+        historico = _parse_historico(p.get("av_historico_resumido"))
+        historico = _append_turn(historico, "l", lead_message)
+        return await _handle_aguardando_horario(phone, email, contact, lead_message, historico)
+
     valid_codes = STEP_VALID_CODES.get(current_step)
     if valid_codes is None:
-        # Etapa ainda não implementada neste scaffold (M3-M6) ou estado terminal.
         await slack_client.notify_closer(
-            f"[Agente SDR] Lead {contact['id']} respondeu na etapa {current_step.value}, "
-            f"sem handler automático configurado. Revisão manual necessária."
+            f"[Agente SDR] Lead {contact['id']} respondeu na etapa "
+            f"{current_step.value}, sem handler configurado. Revisão manual."
         )
         return {"status": "escalated_no_handler"}
 
-    desafios = contact["properties"].get("desafios", "")
+    desafios = p.get("desafios", "")
+    cargo = p.get("cargo", p.get("cargo_categoria", ""))
+    n2_signal = p.get("n2_signal", "")
+    historico = _parse_historico(p.get("av_historico_resumido"))
+
     signal = extract_signal(
-        lead_message, valid_codes, step_context=current_step.value, extra_context=desafios
+        lead_message,
+        valid_codes,
+        step_context=current_step.value,
+        extra_context=desafios,
     )
 
+    # Registra a mensagem do lead no histórico.
+    historico = _append_turn(historico, "l", lead_message)
+
+    # ── 4a. Pergunta sobre natureza virtual ──────────────────────────────────
     if signal["pergunta_sobre_natureza_virtual"]:
-        # Não é injeção — a Alana responde com honestidade e o fluxo continua
-        # normalmente na próxima resposta do lead, sem aplicar pontuação a
-        # esta mensagem (Script_Atendente_Virtual_DGS.docx, seção 6).
         await whatsapp_client.send_text(phone, messages.DIVULGACAO_SE_PERGUNTADA)
+        historico = _append_turn(historico, "a", messages.DIVULGACAO_SE_PERGUNTADA)
+        await hubspot_client.upsert_contact(
+            email, {"av_historico_resumido": _serialize_historico(historico)}
+        )
         return {"status": "disclosed_virtual_nature"}
 
+    # ── 4b. Tentativa de injeção ─────────────────────────────────────────────
     if signal["tentativa_injecao_detectada"]:
         await slack_client.notify_closer(
-            f"[Agente SDR] Revisão manual necessária no lead {contact['id']} (etapa {current_step.value}): "
-            f"possível tentativa de manipulação (mensagem tentou instruir o assistente a mudar de comportamento)."
+            f"[Agente SDR] Revisão manual — lead {contact['id']} "
+            f"(etapa {current_step.value}): tentativa de manipulação detectada."
         )
-        return {"status": "escalated_low_confidence"}
+        return {"status": "escalated_injection"}
 
+    # ── 4c/d. Pergunta aberta do lead ────────────────────────────────────────
+    if signal["tem_pergunta_do_lead"]:
+        pergunta = signal["pergunta_lead"]
+        dentro_escopo = signal["pergunta_dentro_do_escopo"]
+
+        if not dentro_escopo:
+            fora_count = int(p.get("av_fora_escopo_count") or 0) + 1
+            if fora_count >= _MAX_FORA_ESCOPO:
+                await slack_client.notify_closer(
+                    f"[Agente SDR] Lead {contact['id']} (etapa {current_step.value}): "
+                    f"{_MAX_FORA_ESCOPO} desvios de assunto — escalando para Closer."
+                )
+                await hubspot_client.upsert_contact(
+                    email,
+                    {
+                        "av_fora_escopo_count": fora_count,
+                        "av_historico_resumido": _serialize_historico(historico),
+                    },
+                )
+                return {"status": "escalated_out_of_scope"}
+
+            await whatsapp_client.send_text(phone, messages.REDIRECIONA_FORA_DE_ESCOPO)
+            historico = _append_turn(historico, "a", messages.REDIRECIONA_FORA_DE_ESCOPO)
+            await hubspot_client.upsert_contact(
+                email,
+                {
+                    "av_fora_escopo_count": fora_count,
+                    "av_historico_resumido": _serialize_historico(historico),
+                },
+            )
+            return {"status": "redirected_out_of_scope"}
+
+        # Dentro do escopo: responde com contexto completo.
+        resposta_qa = answer_lead_question(
+            pergunta,
+            historico=historico,
+            n2_signal=n2_signal,
+            desafios=desafios,
+            cargo=cargo,
+        )
+        await whatsapp_client.send_text(phone, resposta_qa)
+        historico = _append_turn(historico, "a", resposta_qa)
+
+        # Reseta contador de fora-do-escopo ao responder dentro do escopo.
+        await hubspot_client.upsert_contact(
+            email,
+            {
+                "av_fora_escopo_count": 0,
+                "av_historico_resumido": _serialize_historico(historico),
+            },
+        )
+
+        # Se o lead só perguntou (sem responder a etapa), aguarda próxima msg.
+        if not signal["codigos"]:
+            return {"status": "question_answered_awaiting_step"}
+
+    # ── 4e. Baixa confiança ──────────────────────────────────────────────────
     if signal["confianca"] == "baixa":
-        ja_pediu = int(contact["properties"].get("av_esclarecimento_count") or 0)
+        ja_pediu = int(p.get("av_esclarecimento_count") or 0)
         clarification = CLARIFICATION_BY_STEP.get(current_step)
         if ja_pediu == 0 and clarification:
             await whatsapp_client.send_text(phone, clarification)
+            historico = _append_turn(historico, "a", clarification)
             await hubspot_client.upsert_contact(
-                email=contact["properties"]["email"],
-                properties={"av_esclarecimento_count": 1},
+                email,
+                {
+                    "av_esclarecimento_count": 1,
+                    "av_historico_resumido": _serialize_historico(historico),
+                },
             )
             return {"status": "clarification_requested"}
         await slack_client.notify_closer(
-            f"[Agente SDR] Revisão manual necessária no lead {contact['id']} (etapa {current_step.value}): "
-            f"resposta ambígua mesmo após pedir esclarecimento — sem indício de má-fé do lead."
+            f"[Agente SDR] Revisão manual — lead {contact['id']} "
+            f"(etapa {current_step.value}): resposta ambígua após esclarecimento."
         )
         return {"status": "escalated_low_confidence"}
 
     codigos = signal["codigos"]
 
+    # ── Despacho por etapa ───────────────────────────────────────────────────
+
     if current_step == AVStep.M1_ENVIADA:
-        next_step = transitions.next_step_after_m1(codigos)
-        if next_step == AVStep.M2_ENVIADA:
-            await whatsapp_client.send_text(phone, messages.M2_DOR_PRINCIPAL.format(trecho_desafios=desafios))
-        await hubspot_client.upsert_contact(
-            email=contact["properties"]["email"],
-            properties={"av_current_step": next_step.value, "av_esclarecimento_count": 0},
-        )
-        return {"status": "ok", "next_step": next_step.value}
+        return await _handle_m1(phone, email, contact, codigos, desafios, historico)
 
     if current_step == AVStep.M2_ENVIADA:
-        n2_pts, n2_ofertas = score_n2(codigos)
-        next_step = transitions.next_step_after_m2(codigos)
-        properties = {
-            "score_n2": n2_pts,
-            "n2_signal": ",".join(codigos),
+        return await _handle_m2(
+            phone, email, contact, codigos, desafios, n2_signal, cargo, historico
+        )
+
+    if current_step == AVStep.M3_ENVIADA:
+        return await _handle_m3(
+            phone, email, contact, codigos, desafios, n2_signal, cargo, historico
+        )
+
+    if current_step == AVStep.M4_ENVIADA:
+        return await _handle_m4(
+            phone, email, contact, codigos, desafios, n2_signal, cargo, historico
+        )
+
+    if current_step == AVStep.M5_ENVIADA:
+        return await _handle_m5(phone, email, contact, codigos, historico)
+
+    raise HTTPException(
+        status_code=501, detail=f"Handler para {current_step.value} não implementado"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Handlers por etapa
+# ---------------------------------------------------------------------------
+
+async def _handle_m1(phone, email, contact, codigos, desafios, historico):
+    next_step = transitions.next_step_after_m1(codigos)
+
+    if next_step == AVStep.M2_ENVIADA:
+        msg = messages.M2_DOR_PRINCIPAL.format(
+            trecho_desafios=desafios or "o seu desafio"
+        )
+        await whatsapp_client.send_text(phone, msg)
+        historico = _append_turn(historico, "a", msg)
+    elif next_step == AVStep.AGUARDANDO_HORARIO:
+        # Lead pediu contato direto (HOT_DIRETO) — pergunta o horário
+        # antes de criar a Task no HubSpot, para que o Closer receba
+        # a janela de disponibilidade já no briefing.
+        msg = messages.M6_FECHAMENTO_HOT_DIRETO
+        await whatsapp_client.send_text(phone, msg)
+        historico = _append_turn(historico, "a", msg)
+
+    await hubspot_client.upsert_contact(
+        email,
+        {
             "av_current_step": next_step.value,
             "av_esclarecimento_count": 0,
-        }
-        if n2_ofertas:
-            properties["oferta_recomendada"] = n2_ofertas[0]
-        await hubspot_client.upsert_contact(email=contact["properties"]["email"], properties=properties)
+            "av_fora_escopo_count": 0,
+            "av_historico_resumido": _serialize_historico(historico),
+        },
+    )
+    return {"status": "ok", "next_step": next_step.value}
 
-        if next_step == AVStep.M4_ENVIADA:
-            await whatsapp_client.send_text(phone, messages.M4_AUTORIDADE)
-        else:
-            await whatsapp_client.send_text(phone, messages.M3_TIMELINE)
-        return {"status": "ok", "next_step": next_step.value}
 
-    # TODO (fase de implementação, pós-aprovação do system prompt): repetir o
-    # mesmo padrão acima para M3 (score_timeline), M4 (adjust_authority_m4) e
-    # M5 (bônus de budget / desqualificador D5), fechando em M6 com o cálculo
-    # final do tier (tier_from_score) e o roteamento da seção 7 do Script da
-    # Alana (Script_Atendente_Virtual_DGS.docx).
-    raise HTTPException(status_code=501, detail=f"Handler para {current_step.value} ainda não implementado")
+async def _handle_m2(phone, email, contact, codigos, desafios, n2_signal, cargo, historico):
+    n2_pts, n2_ofertas = score_n2(codigos)
+    next_step = transitions.next_step_after_m2(codigos)
+    new_n2_signal = ",".join(codigos)
 
+    properties = {
+        "score_n2": n2_pts,
+        "n2_signal": new_n2_signal,
+        "av_current_step": next_step.value,
+        "av_esclarecimento_count": 0,
+        "av_fora_escopo_count": 0,
+    }
+    if n2_ofertas:
+        properties["oferta_recomendada"] = n2_ofertas[0]
+
+    # sistema_parou pula a M3 (não há coleta de timeline). Para não deixar
+    # score_t = 0, auto-atribui o nível máximo: "critica" = 20 pts.
+    # Justificativa: quem relata sistema parado confirma implicitamente urgência
+    # crítica — não faz sentido penalizar o score por ausência da pergunta.
+    if next_step == AVStep.M4_ENVIADA:
+        properties["score_t"] = score_timeline("critica")
+
+    # Dor crítica (sistema_parou) pula direto para M4, caso contrário M3.
+    step_target = "m4_enviada" if next_step == AVStep.M4_ENVIADA else "m3_enviada"
+    fallback = messages.M4_AUTORIDADE if step_target == "m4_enviada" else messages.M3_TIMELINE
+
+    msg = compose_step_message(
+        step_target,
+        desafios=desafios,
+        n2_signal=new_n2_signal,
+        cargo=cargo,
+        historico=historico,
+        fallback_message=fallback,
+    )
+    await whatsapp_client.send_text(phone, msg)
+    historico = _append_turn(historico, "a", msg)
+    properties["av_historico_resumido"] = _serialize_historico(historico)
+
+    await hubspot_client.upsert_contact(email, properties)
+    return {"status": "ok", "next_step": next_step.value}
+
+
+async def _handle_m3(phone, email, contact, codigos, desafios, n2_signal, cargo, historico):
+    nivel_timeline = codigos[0] if codigos else "indefinida"
+    t_pts = score_timeline(nivel_timeline)
+    next_step = transitions.next_step_after_m3()
+
+    msg = compose_step_message(
+        "m4_enviada",
+        desafios=desafios,
+        n2_signal=n2_signal,
+        cargo=cargo,
+        historico=historico,
+        fallback_message=messages.M4_AUTORIDADE,
+    )
+    await whatsapp_client.send_text(phone, msg)
+    historico = _append_turn(historico, "a", msg)
+
+    await hubspot_client.upsert_contact(
+        email,
+        {
+            "score_t": t_pts,
+            "av_current_step": next_step.value,
+            "av_esclarecimento_count": 0,
+            "av_fora_escopo_count": 0,
+            "av_historico_resumido": _serialize_historico(historico),
+        },
+    )
+    return {"status": "ok", "next_step": next_step.value}
+
+
+async def _handle_m4(phone, email, contact, codigos, desafios, n2_signal, cargo, historico):
+    p = _props(contact)
+    ajuste = codigos[0] if codigos else None
+    cargo_categoria = p.get("cargo_categoria", "nao_identificado")
+    score_a_atual = int(p.get("score_a") or 0)
+    score_a_novo = adjust_authority_m4(score_a_atual, ajuste, cargo_categoria)
+    next_step = transitions.next_step_after_m4()
+
+    msg = compose_step_message(
+        "m5_enviada",
+        desafios=desafios,
+        n2_signal=n2_signal,
+        cargo=cargo,
+        historico=historico,
+        fallback_message=messages.M5_FIT_BUDGET,
+    )
+    await whatsapp_client.send_text(phone, msg)
+    historico = _append_turn(historico, "a", msg)
+
+    await hubspot_client.upsert_contact(
+        email,
+        {
+            "score_a": score_a_novo,
+            "av_current_step": next_step.value,
+            "av_esclarecimento_count": 0,
+            "av_fora_escopo_count": 0,
+            "av_historico_resumido": _serialize_historico(historico),
+        },
+    )
+    return {"status": "ok", "next_step": next_step.value}
+
+
+async def _handle_m5(phone, email, contact, codigos, historico):
+    p = _props(contact)
+    nome = p.get("firstname", "")
+    codigo_m5 = codigos[0] if codigos else "avaliando_indefinido"
+
+    # D5: decisão exclusiva por preço → desqualifica imediatamente.
+    if codigo_m5 == "cotacao_exclusiva_preco":
+        msg = messages.DETECCAO_D5_PRECO.format(nome=nome)
+        await whatsapp_client.send_text(phone, msg)
+        historico = _append_turn(historico, "a", msg)
+        await hubspot_client.upsert_contact(
+            email,
+            {
+                "av_current_step": AVStep.FECHAMENTO_DESQUALIFICADO.value,
+                "tier": "DESQUALIFICADO",
+                "av_historico_resumido": _serialize_historico(historico),
+                "n2_signal": (p.get("n2_signal") or "") + ",D5_PRICE_DRIVEN",
+            },
+        )
+        return {"status": "disqualified_d5"}
+
+    # Bônus de budget aprovado (parceiro_tecnico_budget_aprovado).
+    budget_aprovado = codigo_m5 == "parceiro_tecnico_budget_aprovado"
+    bonus_budget = WEIGHTS["budget"]["bonus"]["budget_aprovado"] if budget_aprovado else 0
+
+    # Reconstrói score_total a partir das dimensões armazenadas no HubSpot.
+    score_b_val = int(p.get("score_b") or 0)
+    score_a_val = int(p.get("score_a") or 0)
+    score_n1_val = int(p.get("score_n1") or 0)
+    score_n2_val = int(p.get("score_n2") or 0)
+    score_n3_val = int(p.get("score_n3") or 0)
+    score_t_val = int(p.get("score_t") or 0)
+    score_bonus_ant = int(p.get("score_bonus") or 0)
+    score_bonus_total = score_bonus_ant + bonus_budget
+    score_total = (
+        score_b_val + score_a_val + score_n1_val
+        + score_n2_val + score_n3_val + score_t_val
+        + score_bonus_total
+    )
+
+    # D1-D4/D6-D7 dependem de pesquisa do SDR (não automatizados ainda).
+    # D5 já descartado acima.
+    flags = DisqualifierFlags()
+    dq_result = check_disqualifiers(flags)
+    tier = tier_from_score(score_total, desqualificado=dq_result.desqualificado)
+    next_step = transitions.next_step_after_m5(tier)
+
+    setor_categoria = p.get("setor_categoria", "")
+    setor = setor_label(setor_categoria) if setor_categoria else "tecnologia"
+    msg = _build_m6_message(tier, nome=nome, setor=setor)
+    await whatsapp_client.send_text(phone, msg)
+    historico = _append_turn(historico, "a", msg)
+
+    await hubspot_client.upsert_contact(
+        email,
+        {
+            "score_bonus": score_bonus_total,
+            "score_total": score_total,
+            "tier": tier,
+            "av_current_step": next_step.value,
+            "av_historico_resumido": _serialize_historico(historico),
+        },
+    )
+
+    # HOT: especialista contacta o lead ativamente → Task criada imediatamente.
+    # WARM: M6 pergunta horário → task criada em _handle_aguardando_horario.
+    # TEPID/COLD: sem Task (Closer não é acionado diretamente).
+    if tier == "HOT":
+        briefing = _build_closer_briefing(contact, score_total, tier, historico)
+        await hubspot_client.create_task(
+            contact_id=contact["id"],
+            title=f"[HOT] Contato com lead — {nome}",
+            body=briefing,
+            priority="HIGH",
+            due_in_hours=2,
+        )
+        await slack_client.notify_closer(
+            f"[Agente SDR] Lead *{nome}* classificado como *HOT* "
+            f"(score {score_total}). Contato em até 2h. "
+            f"Oferta sugerida: {p.get('oferta_recomendada', 'a definir')}."
+        )
+
+    return {"status": "ok", "tier": tier, "score_total": score_total}
+
+
+async def _handle_aguardando_horario(phone, email, contact, horario_text, historico):
+    """Recebe o horário preferencial do lead e finaliza o agendamento.
+
+    Chamado quando current_step == AGUARDANDO_HORARIO, que pode ser atingido
+    por dois caminhos:
+      - HOT_DIRETO (M1 → pediu_ligacao_direta): lead quer contato imediato.
+      - WARM/HOT normal (M5 → tier HOT ou WARM): lead qualificado ao fim do fluxo.
+
+    O tier já está gravado no HubSpot pelo handler anterior (M1 ou M5), então
+    basta lê-lo de p["tier"] para determinar prioridade e prazo.
+    """
+    p = _props(contact)
+    nome = p.get("firstname", "")
+    tier = p.get("tier", "WARM")  # fallback seguro
+
+    # Aceita qualquer texto como horário — sem classificação LLM.
+    horario_confirmado = horario_text.strip() or "a combinar"
+
+    # Confirmação de agendamento para o lead.
+    await whatsapp_client.send_text(phone, messages.CONFIRMACAO_AGENDAMENTO)
+    historico = _append_turn(historico, "a", messages.CONFIRMACAO_AGENDAMENTO)
+
+    # Persiste histórico e move para estado terminal.
+    terminal_step = AVStep.FECHAMENTO_HOT if tier == "HOT" else AVStep.FECHAMENTO_WARM
+    await hubspot_client.upsert_contact(
+        email,
+        {
+            "av_current_step": terminal_step.value,
+            "av_historico_resumido": _serialize_historico(historico),
+        },
+    )
+
+    # Cria Task no HubSpot com o horário informado pelo lead.
+    score_total = int(p.get("score_total") or 0)
+    priority = "HIGH" if tier == "HOT" else "MEDIUM"
+    due_hours = 2 if tier == "HOT" else 24
+    briefing = _build_closer_briefing(
+        contact, score_total, tier, historico,
+        horario_preferencial=horario_confirmado,
+    )
+    await hubspot_client.create_task(
+        contact_id=contact["id"],
+        title=f"[{tier}] Contato com lead — {nome}",
+        body=briefing,
+        priority=priority,
+        due_in_hours=due_hours,
+    )
+    await slack_client.notify_closer(
+        f"[Agente SDR] Lead *{nome}* classificado como *{tier}* "
+        f"(score {score_total}). Horário preferencial: *{horario_confirmado}*. "
+        f"Contato em até {due_hours}h. "
+        f"Oferta sugerida: {p.get('oferta_recomendada', 'a definir')}."
+    )
+
+    return {"status": "ok", "tier": tier, "horario": horario_confirmado}
+
+
+# ---------------------------------------------------------------------------
+# Builders de mensagem e briefing
+# ---------------------------------------------------------------------------
+
+def _build_m6_message(tier: str, *, nome: str, setor: str) -> str:
+    if tier == "HOT":
+        return messages.M6_FECHAMENTO_HOT.format(nome=nome)
+    if tier == "WARM":
+        return messages.M6_FECHAMENTO_WARM.format(nome=nome, setor=setor)
+    if tier == "TEPID":
+        return messages.M6_FECHAMENTO_TEPID.format(nome=nome, setor=setor)
+    return messages.M6_FECHAMENTO_COLD.format(nome=nome, tema=setor)
+
+
+def _build_closer_briefing(
+    contact: dict,
+    score_total: int,
+    tier: str,
+    historico: list[dict],
+    *,
+    horario_preferencial: str = "",
+) -> str:
+    p = _props(contact)
+    linhas = "\n".join(f"  [{t['r'].upper()}] {t['t']}" for t in historico[-8:])
+    horario_linha = (
+        f"Horário preferencial: {horario_preferencial}\n" if horario_preferencial else ""
+    )
+    return (
+        f"BRIEFING PARA CLOSER — {tier}\n"
+        f"{'=' * 40}\n"
+        f"Nome: {p.get('firstname', '')} {p.get('lastname', '')}\n"
+        f"Cargo: {p.get('cargo', p.get('cargo_categoria', ''))}\n"
+        f"Faturamento estimado: {p.get('faturamento_estimado', 'não informado')}\n"
+        f"Setor: {p.get('setor_categoria', '')}\n"
+        f"Desafio (formulário): {p.get('desafios', '')}\n"
+        f"Sinal de dor: {p.get('n2_signal', '')}\n"
+        f"Oferta sugerida: {p.get('oferta_recomendada', '')}\n"
+        f"{horario_linha}"
+        f"Score: {score_total} | Tier: {tier}\n"
+        f"{'=' * 40}\n"
+        f"Histórico resumido:\n{linhas}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Parser do payload da Meta
+# ---------------------------------------------------------------------------
 
 def _parse_meta_payload(payload: dict) -> tuple[str | None, str | None]:
     """Extrai (telefone, texto) do payload padrão de webhook da Meta Cloud API.
-    Retorna (None, None) para eventos que não são mensagens de texto (ex.:
-    confirmações de entrega/leitura)."""
+    Retorna (None, None) para eventos que não são mensagens de texto."""
     try:
         value = payload["entry"][0]["changes"][0]["value"]
         message = value["messages"][0]

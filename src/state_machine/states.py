@@ -14,6 +14,11 @@ class AVStep(str, Enum):
     M3_ENVIADA = "m3_enviada"
     M4_ENVIADA = "m4_enviada"
     M5_ENVIADA = "m5_enviada"
+    # Estado intermediário: M6 WARM/HOT_DIRETO foi enviado e aguardamos o
+    # lead informar o horário preferencial. Não é terminal — o backend ainda
+    # precisa processar a resposta para confirmar o agendamento e criar a Task
+    # no HubSpot com o horário correto.
+    AGUARDANDO_HORARIO = "aguardando_horario"
     FECHAMENTO_HOT = "fechamento_hot"
     FECHAMENTO_WARM = "fechamento_warm"
     FECHAMENTO_TEPID = "fechamento_tepid"

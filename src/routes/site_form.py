@@ -11,12 +11,13 @@ go-live (ver Especificação Técnica, seção 12).
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request
 
 from ..integrations import hubspot_client, whatsapp_client
 from ..lib.logger import get_logger, mask_name, mask_phone
-from ..lib.security import verify_hmac_signature
+from ..lib.security import verify_hmac_signature, is_rate_limited
 from ..scoring.rules import compute_score
 from ..state_machine.states import AVStep
 
@@ -39,6 +40,15 @@ async def receive_site_form(request: Request):
     missing = [f for f in REQUIRED_FIELDS if f not in payload]
     if missing:
         raise HTTPException(status_code=422, detail=f"Campos obrigatórios ausentes: {missing}")
+
+    # Rate limiting: rejeita resubmissão do mesmo e-mail dentro da janela
+    # configurada (RATE_LIMIT_WINDOW_SECONDS, padrão 60s). O timestamp é lido
+    # do HubSpot — sem estado em memória (Especificação Técnica, seção 3).
+    existing = await hubspot_client.find_contact_by_phone(payload.get("telefone", ""))
+    if existing:
+        last_ts = existing["properties"].get("av_last_submission_at")
+        if is_rate_limited(last_ts):
+            raise HTTPException(status_code=429, detail="Submissão duplicada — aguarde antes de reenviar")
 
     logger.info(
         "Novo lead recebido do formulário do site",
@@ -69,13 +79,26 @@ async def receive_site_form(request: Request):
     await hubspot_client.upsert_contact(
         email=payload["email"],
         properties={
+            # Identificação
             "firstname": payload["nome"],
             "phone": payload["telefone"],
+            # Contexto do formulário — salvo para personalização nas M2-M6
+            "desafios": payload.get("desafios", ""),
+            "cargo_categoria": payload["cargo_categoria"],
+            "cargo": payload.get("cargo", payload["cargo_categoria"]),
+            "setor_categoria": payload.get("setor_categoria", "tech_native_sem_projeto"),
+            "faturamento_estimado": str(payload.get("faturamento_anual", "")),
+            # Scores de entrada
             "score_b": breakdown.b,
             "score_a": breakdown.a,
+            "score_n1": breakdown.n1,
             "score_n2": breakdown.n2,
             "score_total": breakdown.total,
+            # Estado inicial
             "av_current_step": AVStep.AGUARDANDO_M1.value,
+            "av_fora_escopo_count": 0,
+            "av_esclarecimento_count": 0,
+            "av_last_submission_at": datetime.now(timezone.utc).isoformat(),
         },
     )
 

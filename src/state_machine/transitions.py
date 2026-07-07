@@ -11,7 +11,10 @@ from .states import AVStep
 
 def next_step_after_m1(codigos: list[str]) -> AVStep:
     if "pediu_ligacao_direta" in codigos:
-        return AVStep.FECHAMENTO_HOT  # fechamento HOT direto, ver Script M1
+        # Lead quer contato direto — pergunta horário antes de fechar (HOT_DIRETO).
+        # AGUARDANDO_HORARIO não é terminal: o backend processa a resposta e
+        # cria a Task no HubSpot com o horário correto.
+        return AVStep.AGUARDANDO_HORARIO
     if "afirmativo" in codigos:
         return AVStep.M2_ENVIADA
     return AVStep.M1_ENVIADA  # aguarda reengajamento em 24h se não houver outra resposta
@@ -33,9 +36,16 @@ def next_step_after_m4() -> AVStep:
 
 
 def next_step_after_m5(tier: str) -> AVStep:
+    # WARM: M6_FECHAMENTO_WARM termina com "Tem algum horário que funciona
+    # melhor pra você essa semana?" — precisamos aguardar e capturar a resposta
+    # antes de criar a Task no HubSpot, para que o Closer receba a janela de
+    # disponibilidade no briefing.
+    #
+    # HOT: M6_FECHAMENTO_HOT *não* pede horário (especialista contata o lead
+    # ativamente). A Task é criada imediatamente em _handle_m5 para agilidade.
     return {
         "HOT": AVStep.FECHAMENTO_HOT,
-        "WARM": AVStep.FECHAMENTO_WARM,
+        "WARM": AVStep.AGUARDANDO_HORARIO,
         "TEPID": AVStep.FECHAMENTO_TEPID,
         "COLD": AVStep.FECHAMENTO_COLD,
         "DESQUALIFICADO": AVStep.FECHAMENTO_DESQUALIFICADO,

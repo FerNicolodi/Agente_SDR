@@ -90,11 +90,8 @@ DETECCAO_D5_PRECO = (
     "mudar, a gente fica por aqui. Até mais, {nome}!"
 )
 
-# RASCUNHO — ainda não estão no Script_Atendente_Virtual_DGS.docx aprovado.
 # Usadas quando a resposta do lead vem ambígua: em vez de escalar direto pro
-# Closer, a Alana pergunta de novo com outras palavras (uma vez só por
-# etapa). Pendente de validação de texto por Fernando antes de ir pra
-# produção (mesmo tratamento do system_prompt.py).
+# Closer, a Alana pergunta de novo com outras palavras (uma vez só por etapa).
 ESCLARECIMENTO_M2 = (
     "Me conta um pouco mais: isso já tá impactando o dia a dia agora, ou é mais uma coisa "
     "pra resolver lá na frente?"
@@ -111,12 +108,12 @@ ESCLARECIMENTO_M4 = (
 )
 
 ESCLARECIMENTO_M5 = (
-    "Você já tem orçamento e outros fornecedores em cotação, ou tá mais aberto a encontrar "
-    "o parceiro certo primeiro?"
+    "Vamos entender melhor sobre o budget: em que etapa vocês estão? "
+    "Só consultando? É relevante mas não a prioridade agora? "
+    "Já tem um valor destinado para o projeto?"
 )
 
-# RASCUNHO — pendente de validação, mesmo tratamento acima. Usada quando o
-# lead faz uma pergunta fora do escopo comercial/da necessidade dele.
+# Usada quando o lead faz uma pergunta fora do escopo comercial/da necessidade dele.
 REDIRECIONA_FORA_DE_ESCOPO = (
     "Isso foge um pouco do que a gente tava tratando por aqui. Posso voltar pras minhas "
     "perguntas, ou prefere encerrar por aqui?"

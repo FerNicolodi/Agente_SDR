@@ -14,6 +14,28 @@ import httpx
 BASE_URL = "https://api.hubapi.com"
 CRM_OBJECT_TYPE = "contacts"
 
+# Propriedades buscadas em toda chamada a find_contact_by_phone.
+# Mantidas aqui para facilitar sync com a seção 6 da Especificação Técnica
+# quando novas propriedades forem criadas no HubSpot.
+_CONTACT_PROPERTIES = [
+    # Identificação
+    "email", "firstname", "lastname", "phone",
+    # Dados do formulário (contexto para personalização das mensagens)
+    "desafios", "cargo_categoria", "cargo", "setor_categoria", "faturamento_estimado",
+    # Estado da conversa (backend stateless — HubSpot é a única memória)
+    "av_current_step",
+    "av_esclarecimento_count",
+    "av_fora_escopo_count",       # Contador de respostas fora do escopo na etapa atual
+    "av_historico_resumido",      # JSON compacto das últimas trocas (para qa_responder)
+    # Scores acumulados por dimensão
+    "score_b", "score_a", "score_n1", "score_n2", "score_n3", "score_t",
+    "score_bonus", "score_total",
+    # Sinais e oferta recomendada
+    "n2_signal", "oferta_recomendada",
+    # Classificação final
+    "tier",
+]
+
 
 def _headers() -> dict:
     return {
@@ -25,7 +47,7 @@ def _headers() -> dict:
 async def find_contact_by_phone(phone: str) -> dict | None:
     payload = {
         "filterGroups": [{"filters": [{"propertyName": "phone", "operator": "EQ", "value": phone}]}],
-        "properties": ["email", "firstname", "lastname", "av_current_step", "score_total", "tier"],
+        "properties": _CONTACT_PROPERTIES,
         "limit": 1,
     }
     async with httpx.AsyncClient(timeout=15) as client:
@@ -40,12 +62,11 @@ async def upsert_contact(email: str, properties: dict) -> dict:
     `properties` deve usar exatamente os nomes internos definidos na
     Especificação Técnica, seção 6 (score_b, score_a, ..., tier, av_current_step, ...).
     """
-    payload = {"properties": properties}
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(
             f"{BASE_URL}/crm/v3/objects/{CRM_OBJECT_TYPE}?idProperty=email",
             headers=_headers(),
-            json={**payload, "properties": {**properties, "email": email}},
+            json={"properties": {**properties, "email": email}},
         )
         resp.raise_for_status()
         return resp.json()

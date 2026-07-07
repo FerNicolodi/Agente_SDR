@@ -32,14 +32,49 @@ def verify_meta_webhook_challenge(mode: str | None, token: str | None, expected_
     return mode == "subscribe" and token == expected_verify_token
 
 
-# NOTA (Especificação Técnica, seção 3): o backend roda em um container
-# stateless (Portal de Deploy DB1, sem persistência local). Rate limiting por
-# telefone/IP não pode depender de um contador em memória — precisa consultar
-# um estado externo (ex.: timestamp da última submissão gravado no HubSpot,
-# ou um cache gerenciado fora do container). Ainda não implementado neste
-# scaffold; tratar antes do go-live (ver seção 12 - pendências).
-def is_rate_limited(_identifier: str) -> bool:
-    raise NotImplementedError(
-        "Rate limiting depende de um estado externo ao container — "
-        "definir a fonte (HubSpot ou cache externo) antes do go-live."
-    )
+import os
+from datetime import datetime, timezone, timedelta
+
+
+# Janela mínima entre submissões do mesmo identificador (telefone ou e-mail).
+# Configurável via variável de ambiente; padrão: 60 segundos.
+_RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "60"))
+
+# Timestamp ISO da última submissão aceita, lido do HubSpot antes de chamar
+# esta função. Deve ser passado como `last_submission_iso` pelo chamador.
+# A gravação do novo timestamp após aceitar a requisição é responsabilidade
+# da camada de rota (não desta função — mantém separação de responsabilidades).
+
+
+def is_rate_limited(last_submission_iso: str | None) -> bool:
+    """Verifica se o identificador está dentro da janela de rate limiting.
+
+    Args:
+        last_submission_iso: Valor da propriedade `av_last_submission_at` do
+            Contact no HubSpot (string ISO 8601), ou None se for o primeiro
+            contato. O HubSpot é a fonte de verdade — o backend não mantém
+            estado em memória (Especificação Técnica, seção 3).
+
+    Returns:
+        True se a requisição deve ser rejeitada (dentro da janela).
+        False se pode prosseguir.
+
+    Uso na rota:
+        last_ts = contact["properties"].get("av_last_submission_at")
+        if is_rate_limited(last_ts):
+            raise HTTPException(status_code=429, detail="Muitas requisições")
+        # ... processa ...
+        await hubspot_client.upsert_contact(email, {
+            "av_last_submission_at": datetime.now(timezone.utc).isoformat()
+        })
+    """
+    if not last_submission_iso:
+        return False  # primeiro contato, sempre aceita
+    try:
+        last_dt = datetime.fromisoformat(last_submission_iso)
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=timezone.utc)
+        elapsed = datetime.now(timezone.utc) - last_dt
+        return elapsed < timedelta(seconds=_RATE_LIMIT_WINDOW_SECONDS)
+    except ValueError:
+        return False  # timestamp malformado → aceita e sobrescreve

@@ -32,12 +32,17 @@ class ScoreBreakdown:
     n3: int = 0
     t: int = 0
     bonus: int = 0
+    ai_first: int = 0          # Pontos de AI First Receptiveness (0-5)
+    ai_first_nivel: str = "media"  # 'alta' | 'media' | 'baixa'
     porte: str | None = None
     n1_oferta: str | None = None
     ofertas_sinalizadas: list[str] = field(default_factory=list)
 
     @property
     def total(self) -> int:
+        # ai_first NÃO entra no total BANT — é dimensão auxiliar para
+        # orientação de oferta e briefing do Closer. O tier é determinado
+        # exclusivamente pelo BANT para manter comparabilidade entre leads.
         return self.b + self.a + self.n1 + self.n2 + self.n3 + self.t + self.bonus
 
 
@@ -129,6 +134,26 @@ def score_n3(signal_codes: list[str]) -> tuple[int, list[str]]:
 def score_timeline(nivel: str) -> int:
     """nivel: 'critica' | 'alta' | 'media' | 'difusa' | 'indefinida'."""
     return WEIGHTS["timeline"].get(nivel, 0)
+
+
+def score_ai_first(codigos: list[str]) -> tuple[int, str]:
+    """Extrai receptividade AI First dos códigos retornados na M2.
+
+    Retorna (pontos, nivel). O score NÃO é somado ao total BANT — é armazenado
+    separadamente em score_ai_first / ai_first_nivel no HubSpot para orientar
+    o Closer sobre qual oferta ressaltar (GenAI/Agentic Squad vs Core Up).
+
+    Hierarquia:
+      ia_interesse_explicito → alta (5 pts)
+      ia_resistencia_explicita → baixa (0 pts)
+      ausência de ambos → media (2 pts, default)
+    """
+    w = WEIGHTS["ai_first_receptiveness"]
+    if "ia_interesse_explicito" in codigos:
+        return w["ia_interesse_explicito"], "alta"
+    if "ia_resistencia_explicita" in codigos:
+        return w["ia_resistencia_explicita"], "baixa"
+    return w["media_default"], "media"
 
 
 def tier_from_score(score_total: int, desqualificado: bool = False) -> str:

@@ -4,8 +4,25 @@ internas db1-fundacao, db1-global-software-perfil-estrategico e
 dgs-contexto-knowledge — não é a skill completa, é um resumo otimizado
 para respostas curtas de WhatsApp.
 
-Manter atualizado manualmente se a oferta ou o posicionamento mudar — não
-há sincronização automática com as skills.
+PROCESSO DE SINCRONIZAÇÃO MANUAL
+Última sincronização: 2026-07-08
+Skills de referência: db1-fundacao · db1-global-software-perfil-estrategico · dgs-contexto-knowledge
+
+Não há sincronização automática com o plugin. Revisar este arquivo sempre que:
+  - Uma nova oferta DGS for lançada ou descontinuada
+  - Métricas de referência mudarem (NPS, % on-time, GPTW, nº clientes)
+  - O posicionamento AI First sofrer alteração oficial
+  - Um novo diferencial competitivo for adicionado ao Engineering Guide
+  - O número de colaboradores ou de clientes mudar significativamente
+
+Checklist de sincronização (verificar vs skills acima):
+  [ ] Dados corporativos: anos de mercado, nº colaboradores, nº clientes, países
+  [ ] Métricas: on-time delivery, retrabalho, satisfação, NPS, GPTW
+  [ ] Lista de ofertas e descrições resumidas
+  [ ] Diferenciais: Engineering Guide, Painel de Saúde, cultura
+  [ ] Posicionamento AI First e frase-chave
+
+Responsável pela revisão: Fernando Nicolodi (Head de Novos Negócios)
 """
 
 CONHECIMENTO_DB1_DGS = """

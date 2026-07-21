@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, EmailStr, field_validator
 
 from ..integrations import hubspot_client, whatsapp_client
 from ..lib.logger import get_logger
@@ -25,6 +26,28 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 
+class TimerCallbackPayload(BaseModel):
+    """HIGH-04: Pydantic model para validação tipada do payload do HubSpot Workflow.
+
+    Antes usávamos payload["email"] diretamente — sem validação de tipo,
+    um campo malformado causaria KeyError ou TypeError sem log estruturado.
+    Agora o FastAPI retorna 422 com detalhe do campo inválido antes de
+    qualquer lógica de negócio ser executada.
+    """
+
+    email: EmailStr
+    phone: str
+    ja_reengajado: bool = False
+
+    @field_validator("phone")
+    @classmethod
+    def phone_must_be_nonempty(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("phone não pode ser vazio")
+        return v
+
+
 @router.post("/webhook/timer-callback")
 async def handle_timer_callback(request: Request):
     raw_body = await request.body()
@@ -32,10 +55,16 @@ async def handle_timer_callback(request: Request):
     if not verify_hmac_signature(raw_body, signature, os.environ["HUBSPOT_WORKFLOW_HMAC_SECRET"]):
         raise HTTPException(status_code=401, detail="Assinatura inválida")
 
-    payload = await request.json()
-    email = payload["email"]
-    phone = payload["phone"]
-    ja_reengajado = payload.get("ja_reengajado", False)
+    # HIGH-04: validação tipada — lança 422 com detalhe se campo ausente ou malformado
+    payload_raw = await request.json()
+    try:
+        payload = TimerCallbackPayload.model_validate(payload_raw)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    email = payload.email
+    phone = payload.phone
+    ja_reengajado = payload.ja_reengajado
 
     contact = await hubspot_client.find_contact_by_phone(phone)
     if contact is None:

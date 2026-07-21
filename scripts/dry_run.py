@@ -10,22 +10,22 @@ USO
   # Modo interativo — você digita as respostas no lugar do lead.
   # Ideal para sessões de usabilidade antes do go-live.
   export ANTHROPIC_API_KEY=sk-ant-...
-  python scripts/dry_run.py --persona banco_hot
+  python3 scripts/dry_run.py --persona banco_hot
 
   # Modo automático — usa respostas pré-scriptadas. Bom para regressão
   # após mexer no prompt ou no scoring.
-  python scripts/dry_run.py --persona banco_hot --auto
+  python3 scripts/dry_run.py --persona banco_hot --auto
 
   # Lista todas as personas disponíveis:
-  python scripts/dry_run.py --list
+  python3 scripts/dry_run.py --list
 
 PERSONAS DISPONÍVEIS
 --------------------
 ENCERRAMENTO POR AGENDAMENTO (dia e horário capturados):
   varejo_warm         CEO de varejista, sistema de estoque travando → WARM + horário
-  banco_hot           CTO de banco regional, prazo Open Finance → WARM + horário
+  banco_hot           CTO de banco regional, prazo Open Finance → HOT direto (score 83, sem horário)
   budget_aprovado     CTO com sistema parado + budget aprovado → HOT direto (task imediata)
-  pergunta_se_e_bot   Lead pergunta se é robô antes de qualificar → HOT + horário
+  pergunta_se_e_bot   Lead pergunta se é robô antes de qualificar → WARM + horário
 
 ENCERRAMENTO POR DESQUALIFICAÇÃO:
   d5_preco_real       Lead deixa claro que quer apenas o menor preço → D5, encerrado
@@ -41,6 +41,7 @@ CASOS ESPECIAIS:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import sys
 from dataclasses import dataclass, field
@@ -56,6 +57,7 @@ from src.scoring.disqualifiers import DisqualifierFlags, check_disqualifiers
 from src.scoring.rules import (
     WEIGHTS,
     adjust_authority_m4,
+    score_ai_first,
     score_authority,
     score_budget,
     score_n1,
@@ -71,9 +73,11 @@ from src.state_machine.states import AVStep
 # STEP_VALID_CODES — deve estar em sincronia com routes/whatsapp.py
 # ---------------------------------------------------------------------------
 
+_AI_CODES_M2 = {"ia_interesse_explicito", "ia_resistencia_explicita"}
+
 STEP_VALID_CODES = {
     AVStep.M1_ENVIADA: ["afirmativo", "pediu_ligacao_direta", "sem_tempo_agora"],
-    AVStep.M2_ENVIADA: [k for k in WEIGHTS["n2_sinais_dor"] if k != "cap"],
+    AVStep.M2_ENVIADA: [k for k in WEIGHTS["n2_sinais_dor"] if k != "cap"] + list(_AI_CODES_M2),
     AVStep.M3_ENVIADA: ["critica", "alta", "media", "difusa", "indefinida"],
     AVStep.M4_ENVIADA: [
         "autonomia_total",
@@ -128,8 +132,9 @@ PERSONAS: dict[str, LeadProfile] = {
             "tem prazo sim, é até o fim do semestre",
             "eu defino, mas preciso de aprovação do CEO",
             "quero um parceiro que resolva de ponta a ponta, não só o mais barato",
-            # Horário: reply to M6_FECHAMENTO_WARM "Tem algum horário que funciona melhor pra você essa semana?"
-            "quarta-feira à tarde, a partir das 14h",
+            # Nota: banco_hot → tier HOT (score 83). HOT não captura horário — esta reply nunca é consumida.
+            # Mantida para facilitar reaproveitamento da persona em testes WARM futuros.
+            # "quarta-feira à tarde, a partir das 14h",
         ],
     ),
     "varejo_warm": LeadProfile(
@@ -198,7 +203,7 @@ PERSONAS: dict[str, LeadProfile] = {
         cargo_categoria="gerente_arquiteto",
         setor_categoria="industria_manufatura_agro",
         trecho_desafios="ERP industrial sem suporte e backlog represado há 6 meses",
-        descricao="Lead pergunta se é robô → divulgação honesta → conversa segue → HOT + horário",
+        descricao="Lead pergunta se é robô → divulgação honesta → conversa segue → WARM + horário",
         canned_replies=[
             "oi, antes de mais nada: você é um robô ou uma pessoa de verdade?",
             "ok, faz sentido, pode perguntar",
@@ -299,7 +304,7 @@ def escalate(motivo: str) -> None:
 # Runner principal
 # ---------------------------------------------------------------------------
 
-def run(persona: LeadProfile, interactive: bool) -> None:
+async def run(persona: LeadProfile, interactive: bool) -> None:
     reply_queue = list(persona.canned_replies)
     b_pts, porte, _ = score_budget(persona.faturamento_anual)
     a_pts = score_authority(persona.cargo_categoria)
@@ -311,6 +316,7 @@ def run(persona: LeadProfile, interactive: bool) -> None:
     print("=" * 70)
 
     score = {"b": b_pts, "a": a_pts, "n1": n1_pts, "n2": 0, "n3": 0, "t": 0, "bonus": 0}
+    ai_first_info = {"pts": 2, "nivel": "media"}  # default neutro
     disqualifiers = DisqualifierFlags()
     transcript: list[str] = []
     historico: list[dict] = []          # persiste entre turnos (contexto para qa_responder e composer)
@@ -334,7 +340,7 @@ def run(persona: LeadProfile, interactive: bool) -> None:
             return
 
         valid_codes = STEP_VALID_CODES[step]
-        signal = extract_signal(
+        signal = await extract_signal(
             reply,
             valid_codes,
             step_context=step.value,
@@ -370,7 +376,7 @@ def run(persona: LeadProfile, interactive: bool) -> None:
             else:
                 fora_escopo_count = 0
                 # Responde com contexto completo (histórico + sinal de dor + cargo)
-                resposta = answer_lead_question(
+                resposta = await answer_lead_question(
                     signal["pergunta_lead"],
                     historico=historico,
                     n2_signal=",".join(signal.get("codigos", [])),
@@ -416,16 +422,22 @@ def run(persona: LeadProfile, interactive: bool) -> None:
 
         # ── M2 ───────────────────────────────────────────────────────────────
         elif step == AVStep.M2_ENVIADA:
-            score["n2"], _ = score_n2(codigos)
-            n2_signal_str = ",".join(codigos)
-            step = transitions.next_step_after_m2(codigos)
+            codigos_dor = [c for c in codigos if c not in _AI_CODES_M2]
+            codigos_ai  = [c for c in codigos if c in _AI_CODES_M2]
+            score["n2"], _ = score_n2(codigos_dor)
+            ai_pts, ai_nivel = score_ai_first(codigos_ai)
+            ai_first_info.update({"pts": ai_pts, "nivel": ai_nivel})
+            if codigos_ai:
+                print(f"  [AI FIRST]  receptividade={ai_nivel} ({ai_pts} pts) — código: {codigos_ai}")
+            n2_signal_str = ",".join(codigos_dor)
+            step = transitions.next_step_after_m2(codigos_dor)
             # sistema_parou pula M3 — auto-atribui timeline "critica" (20 pts)
             if step == AVStep.M4_ENVIADA:
                 score["t"] = score_timeline("critica")
                 print(f"  [AUTO-SCORE] M3 pulada (sistema_parou) → score_t auto = {score['t']} pts (critica)")
             target = "m4_enviada" if step == AVStep.M4_ENVIADA else "m3_enviada"
             fallback = messages.M4_AUTORIDADE if target == "m4_enviada" else messages.M3_TIMELINE
-            msg = compose_step_message(
+            msg = await compose_step_message(
                 target,
                 desafios=persona.trecho_desafios,
                 n2_signal=n2_signal_str,
@@ -442,7 +454,7 @@ def run(persona: LeadProfile, interactive: bool) -> None:
                 t["t"] for t in historico if t["r"] == "l"
             )[:80]  # aproximação para o dry-run
             step = transitions.next_step_after_m3()
-            msg = compose_step_message(
+            msg = await compose_step_message(
                 "m4_enviada",
                 desafios=persona.trecho_desafios,
                 n2_signal=n2_signal_str,
@@ -457,7 +469,7 @@ def run(persona: LeadProfile, interactive: bool) -> None:
             ajuste = codigos[0] if codigos else None
             score["a"] = adjust_authority_m4(score["a"], ajuste, persona.cargo_categoria)
             step = transitions.next_step_after_m4()
-            msg = compose_step_message(
+            msg = await compose_step_message(
                 "m5_enviada",
                 desafios=persona.trecho_desafios,
                 cargo=persona.cargo_categoria,
@@ -480,7 +492,7 @@ def run(persona: LeadProfile, interactive: bool) -> None:
             setor = setor_label(persona.setor_categoria)
 
             print(f"\n  [SCORE FINAL] {score}")
-            print(f"  [SCORE FINAL] total={total} | tier={tier}")
+            print(f"  [SCORE FINAL] total={total} | tier={tier} | AI First={ai_first_info['nivel']} ({ai_first_info['pts']} pts)")
 
             if resultado_d.desqualificado:
                 send(messages.DETECCAO_D5_PRECO.format(nome=persona.nome), historico, transcript)
@@ -547,4 +559,4 @@ if __name__ == "__main__":
     if not args.persona:
         parser.error("--persona é obrigatório (ou use --list para ver as opções)")
 
-    run(PERSONAS[args.persona], interactive=not args.auto)
+    asyncio.run(run(PERSONAS[args.persona], interactive=not args.auto))

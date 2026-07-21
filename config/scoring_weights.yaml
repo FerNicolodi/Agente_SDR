@@ -78,6 +78,15 @@ tiers:
   tepid: 35
   # abaixo de tepid = COLD
 
+ai_first_receptiveness:
+  # Capturado oportunisticamente na M2 — não é uma pergunta dedicada.
+  # ia_interesse_explicito: lead menciona iniciativas de IA, AI First, GenAI, agentes de IA.
+  # ia_resistencia_explicita: lead demonstra resistência ou descarte explícito de IA.
+  # Ausência de ambos = media (2 pts) — atribuído como default em _handle_m2.
+  ia_interesse_explicito: 5
+  ia_resistencia_explicita: 0
+  media_default: 2
+
 disqualifiers:
   D1: "Tech native com 10+ vagas CLT de TI abertas nos últimos 6 meses"
   D2: "Startup com menos de 100 funcionários"

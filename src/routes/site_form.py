@@ -7,6 +7,13 @@ fechada no próprio formulário do site (dropdown), não de texto livre — a
 pontuação de Authority depende de bater exatamente com uma chave de
 config/scoring_weights.yaml. Alinhar isso com o time do site antes do
 go-live (ver Especificação Técnica, seção 12).
+
+M4 — Sanitização do campo desafios:
+O campo `desafios` é texto livre preenchido pelo lead no site. Antes de ser
+persistido no HubSpot e usado como contexto nos LLMs, é sanitizado pelo
+mesmo pipeline de segurança do WhatsApp (sanitize_lead_input). Tentativas
+de injeção via formulário são logadas e o conteúdo limpo é salvo no lugar
+do raw.
 """
 from __future__ import annotations
 
@@ -17,14 +24,16 @@ from fastapi import APIRouter, HTTPException, Request
 
 from ..integrations import hubspot_client, whatsapp_client
 from ..lib.logger import get_logger, mask_name, mask_phone
-from ..lib.security import verify_hmac_signature, is_rate_limited
+from ..lib.security import verify_hmac_signature, is_rate_limited, sanitize_lead_input
 from ..scoring.rules import compute_score
 from ..state_machine.states import AVStep
 
 router = APIRouter()
 logger = get_logger(__name__)
 
-WHATSAPP_M1_TEMPLATE_NAME = os.environ.get("META_WA_M1_TEMPLATE_NAME", "abertura_qualificacao_v1")
+# Evolution API não usa templates Meta — o nome é mantido apenas para
+# compatibilidade com a assinatura de send_template(); o cliente ignora-o.
+WHATSAPP_M1_TEMPLATE_NAME = "abertura_qualificacao_v1"
 
 REQUIRED_FIELDS = ["nome", "email", "telefone", "cargo_categoria", "faturamento_anual", "desafios"]
 
@@ -60,6 +69,26 @@ async def receive_site_form(request: Request):
         },
     )
 
+    # M4 — Sanitização do campo desafios (texto livre do formulário).
+    # Aplica o mesmo pipeline de segurança do WhatsApp: strip de zero-width,
+    # detecção de role indicators, URL/Base64 encoding e truncamento.
+    # O conteúdo limpo substitui o raw no payload antes de qualquer uso.
+    raw_desafios = payload.get("desafios", "")
+    sanitized_desafios = sanitize_lead_input(raw_desafios)
+    if sanitized_desafios.injection_signal_detected:
+        logger.warning(
+            "Tentativa de injeção detectada no campo desafios do formulário (M4)",
+            extra={
+                "context": {
+                    "telefone": mask_phone(payload.get("telefone", "")),
+                    "attack_vector": sanitized_desafios.attack_vector,
+                    "raw_length": len(raw_desafios),
+                    "detection_layer": "site_form_desafios",
+                }
+            },
+        )
+    desafios_clean = sanitized_desafios.text
+
     # Nesta etapa: B e A vêm direto do formulário. N1 (setor) e N3
     # (tecnografia) dependem da pesquisa do SDR e ainda não estão
     # disponíveis. T (timeline) só é confirmado na conversa (M3). N2 usa
@@ -83,7 +112,8 @@ async def receive_site_form(request: Request):
             "firstname": payload["nome"],
             "phone": payload["telefone"],
             # Contexto do formulário — salvo para personalização nas M2-M6
-            "desafios": payload.get("desafios", ""),
+            # M4: salva o texto sanitizado, nunca o raw
+            "desafios": desafios_clean,
             "cargo_categoria": payload["cargo_categoria"],
             "cargo": payload.get("cargo", payload["cargo_categoria"]),
             "setor_categoria": payload.get("setor_categoria", "tech_native_sem_projeto"),

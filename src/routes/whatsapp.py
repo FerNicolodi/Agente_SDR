@@ -1,7 +1,11 @@
-"""Callback da Meta Cloud API — orquestração completa M1-M6.
+"""Webhook da Z-API — orquestração completa M1-M6.
+
+Canal: Z-API (z-api.io), SaaS gerenciado de API WhatsApp.
+Substituiu a Meta Cloud API para eliminar o processo de aprovação de
+templates e a restrição de janela de 24h.
 
 Fluxo por mensagem recebida:
-  1. Verificar assinatura da Meta.
+  1. Verificar header `client-token` da Z-API (verify_zapi_webhook).
   2. Recuperar estado e contexto do lead no HubSpot (backend stateless).
   3. Chamar o extrator de sinal (LLM — enum fechado, nunca texto livre).
   4. Tratar casos especiais antes de avançar o estado:
@@ -16,24 +20,22 @@ Fluxo por mensagem recebida:
   6. Gerar próxima mensagem contextualizada (llm/message_composer.py para
      M3-M5) ou usar copy fixa de messages.py (M1, M2, M6).
   7. Persistir novo estado e histórico resumido no HubSpot.
-
-Melhorias de fluidez (v0.9):
-  - qa_responder recebe histórico + sinal de dor + cargo — respostas
-    contextualizadas, não genéricas.
-  - M3-M5 geradas pelo message_composer com base no contexto do lead.
-  - av_fora_escopo_count: após 3 desvios de assunto na mesma etapa, escala.
-  - av_historico_resumido: persiste entre requisições para manter contexto.
 """
 from __future__ import annotations
 
 import json
 import os
+import time as _time
 
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from ..integrations import hubspot_client, slack_client, whatsapp_client
-from ..lib.logger import get_logger
-from ..lib.security import verify_meta_signature, verify_meta_webhook_challenge
+from ..lib.logger import get_logger, mask_phone
+from ..lib.output_guard import check_output
+from ..lib.security import (
+    sanitize_lead_input,
+    verify_zapi_webhook,
+)
 from ..llm.message_composer import compose_step_message
 from ..llm.prompts import messages
 from ..llm.qa_responder import answer_lead_question
@@ -42,6 +44,7 @@ from ..scoring.disqualifiers import DisqualifierFlags, check_disqualifiers
 from ..scoring.rules import (
     WEIGHTS,
     adjust_authority_m4,
+    score_ai_first,
     score_n2,
     score_timeline,
     setor_label,
@@ -53,14 +56,19 @@ from ..state_machine.states import AVStep, TERMINAL_STEPS
 router = APIRouter()
 logger = get_logger(__name__)
 
-META_VERIFY_TOKEN = os.environ.get("META_WA_VERIFY_TOKEN", "")
-META_APP_SECRET = os.environ.get("META_APP_SECRET", "")
+ZAPI_CLIENT_TOKEN = os.environ.get("ZAPI_CLIENT_TOKEN", "")
 
 # Códigos válidos por etapa — forçam o LLM a um enum fechado
 # (Especificação Técnica, seção 9). Nunca texto livre.
 STEP_VALID_CODES = {
     AVStep.M1_ENVIADA: ["afirmativo", "pediu_ligacao_direta", "sem_tempo_agora"],
-    AVStep.M2_ENVIADA: [k for k in WEIGHTS["n2_sinais_dor"] if k != "cap"],
+    AVStep.M2_ENVIADA: [k for k in WEIGHTS["n2_sinais_dor"] if k != "cap"] + [
+        # Receptividade AI First — retornados opcionalmente junto com o código
+        # de dor principal quando o lead expressa posição explícita sobre IA.
+        # Ausência de ambos = media (tratado em _handle_m2).
+        "ia_interesse_explicito",
+        "ia_resistencia_explicita",
+    ],
     AVStep.M3_ENVIADA: ["critica", "alta", "media", "difusa", "indefinida"],
     AVStep.M4_ENVIADA: [
         "autonomia_total",          # decide sozinho, sem mencionar mais ninguém
@@ -91,6 +99,13 @@ _MAX_FORA_ESCOPO = 3
 # Máximo de turnos mantidos no histórico compacto.
 _HISTORICO_MAX_TURNS = 10
 
+# MED-02: Rate limiting in-memory por número do WhatsApp.
+# Previne spam de LLM calls (custo e consistência do histórico).
+# Não persiste entre restarts — suficiente para prevenir rafagas rápidas.
+# Para multi-worker, usar Redis ou HubSpot como backend de rate limit.
+_WA_RATE_LIMIT: dict[str, float] = {}
+_WA_RATE_WINDOW = float(os.environ.get("RATE_LIMIT_WA_WINDOW_SECONDS", "5"))
+
 
 # ---------------------------------------------------------------------------
 # Helpers de histórico
@@ -102,7 +117,14 @@ def _parse_historico(raw: str | None) -> list[dict]:
         return []
     try:
         return json.loads(raw)
-    except Exception:
+    except Exception as exc:
+        # LOW-06: log explícito — histórico corrompido no HubSpot é silencioso
+        # sem isso, o lead continua o fluxo sem contexto histórico e recebe
+        # respostas genéricas do qa_responder sem aviso.
+        logger.warning(
+            "av_historico_resumido corrompido — descartado e reiniciado",
+            extra={"context": {"error": str(exc), "raw_length": len(raw)}},
+        )
         return []
 
 
@@ -125,34 +147,106 @@ def _props(contact: dict) -> dict:
     return contact.get("properties", {})
 
 
+async def _send_guarded(
+    phone: str,
+    text: str,
+    fallback: str,
+    contact: dict,
+    step: str,
+) -> str:
+    """Envia texto LLM-gerado após output guard (C3).
+
+    Verifica se o texto contém termos internos do system prompt antes de
+    enviá-lo ao lead. Se o guard disparar:
+    - Loga o incidente com o termo detectado.
+    - Notifica o Closer via Slack para revisão.
+    - Envia o fallback em vez do texto comprometido.
+
+    Args:
+        phone: Número de destino.
+        text: Texto LLM-gerado a verificar.
+        fallback: Mensagem segura de fallback (copy fixa de messages.py).
+        contact: Objeto contact do HubSpot (para log de contact_id).
+        step: Nome da etapa, usado no log e na notificação.
+
+    Returns:
+        O texto efetivamente enviado (original ou fallback).
+    """
+    guard = check_output(text)
+    if not guard.is_safe:
+        logger.warning(
+            "Output guard ativado: termo interno detectado na saída LLM",
+            extra={
+                "context": {
+                    "contact_id": contact["id"],
+                    "step": step,
+                    "matched_term": guard.matched_term,
+                }
+            },
+        )
+        await slack_client.notify_closer(
+            f"[Agente SDR] Revisão manual — lead {contact['id']} (etapa {step}): "
+            f"output guard ativado (termo interno detectado: '{guard.matched_term}'). "
+            "Fallback enviado ao lead."
+        )
+        text = fallback
+    await whatsapp_client.send_text(phone, text)
+    return text
+
+
 # ---------------------------------------------------------------------------
 # Handlers de webhook
 # ---------------------------------------------------------------------------
 
-@router.get("/webhook/whatsapp")
-async def verify_webhook(request: Request):
-    """Handshake de configuração exigido pela Meta ao cadastrar o webhook."""
-    params = request.query_params
-    if verify_meta_webhook_challenge(
-        params.get("hub.mode"),
-        params.get("hub.verify_token"),
-        META_VERIFY_TOKEN,
-    ):
-        return Response(content=params.get("hub.challenge", ""), media_type="text/plain")
-    raise HTTPException(status_code=403, detail="Verify token inválido")
-
-
 @router.post("/webhook/whatsapp")
 async def receive_whatsapp_message(request: Request):
-    raw_body = await request.body()
-    signature = request.headers.get("X-Hub-Signature-256")
-    if not verify_meta_signature(raw_body, signature, META_APP_SECRET):
-        raise HTTPException(status_code=401, detail="Assinatura inválida")
+    # Verifica o header `client-token` enviado pela Z-API em cada webhook.
+    client_token = request.headers.get("client-token")
+    if not verify_zapi_webhook(client_token, ZAPI_CLIENT_TOKEN):
+        raise HTTPException(status_code=401, detail="client-token inválido")
 
     payload = await request.json()
-    phone, lead_message = _parse_meta_payload(payload)
+    phone, lead_message = _parse_zapi_payload(payload)
     if phone is None:
         return {"status": "ignored"}  # evento de status (entregue/lido)
+
+    # MED-02: Rate limiting in-memory por número — previne rafagas de LLM calls.
+    now = _time.monotonic()
+    last_ts = _WA_RATE_LIMIT.get(phone, 0.0)
+    if now - last_ts < _WA_RATE_WINDOW:
+        logger.info(
+            "Mensagem WhatsApp descartada por rate limiting",
+            extra={"context": {"phone": mask_phone(phone), "window_s": _WA_RATE_WINDOW}},
+        )
+        return {"status": "rate_limited"}
+    _WA_RATE_LIMIT[phone] = now
+
+    # ── C1 + C2: Sanitização pré-LLM com log estruturado de ataque ──────────
+    # Executado antes de qualquer consulta ao HubSpot para evitar custo em
+    # inputs maliciosos. Se injection_signal_detected, escalamos sem chamar LLM.
+    sanitized = sanitize_lead_input(lead_message)
+    if sanitized.injection_signal_detected:
+        # C2: log estruturado com vetor de ataque e comprimento original —
+        # essencial para análise de padrões e refinamento das defesas.
+        logger.warning(
+            "Tentativa de injeção detectada na sanitização pré-LLM",
+            extra={
+                "context": {
+                    "phone": mask_phone(phone),
+                    "attack_vector": sanitized.attack_vector,
+                    "raw_length": len(lead_message),
+                    "was_truncated": sanitized.was_truncated,
+                    "detection_layer": "pre_llm_sanitization",
+                }
+            },
+        )
+        await slack_client.notify_closer(
+            f"[Agente SDR] Revisão manual — {mask_phone(phone)}: "
+            f"injeção detectada antes do processamento "
+            f"(vetor: {sanitized.attack_vector}, tamanho: {len(lead_message)} chars)."
+        )
+        return {"status": "escalated_injection_presanitize"}
+    lead_message = sanitized.text
 
     contact = await hubspot_client.find_contact_by_phone(phone)
     if contact is None:
@@ -185,7 +279,7 @@ async def receive_whatsapp_message(request: Request):
     n2_signal = p.get("n2_signal", "")
     historico = _parse_historico(p.get("av_historico_resumido"))
 
-    signal = extract_signal(
+    signal = await extract_signal(
         lead_message,
         valid_codes,
         step_context=current_step.value,
@@ -206,6 +300,20 @@ async def receive_whatsapp_message(request: Request):
 
     # ── 4b. Tentativa de injeção ─────────────────────────────────────────────
     if signal["tentativa_injecao_detectada"]:
+        # C2: log estruturado — o signal extractor é a segunda camada de
+        # detecção (pós-LLM). Chegou aqui significa que passou pela sanitização
+        # C1 mas o LLM ainda identificou manipulação no conteúdo semântico.
+        logger.warning(
+            "Tentativa de injeção detectada pelo signal extractor (pós-LLM)",
+            extra={
+                "context": {
+                    "contact_id": contact["id"],
+                    "step": current_step.value,
+                    "detection_layer": "post_llm_signal_extractor",
+                    "confianca": signal.get("confianca"),
+                }
+            },
+        )
         await slack_client.notify_closer(
             f"[Agente SDR] Revisão manual — lead {contact['id']} "
             f"(etapa {current_step.value}): tentativa de manipulação detectada."
@@ -245,14 +353,21 @@ async def receive_whatsapp_message(request: Request):
             return {"status": "redirected_out_of_scope"}
 
         # Dentro do escopo: responde com contexto completo.
-        resposta_qa = answer_lead_question(
+        # C3: output guard antes de enviar — detecta vazamento do system prompt.
+        resposta_qa = await answer_lead_question(
             pergunta,
             historico=historico,
             n2_signal=n2_signal,
             desafios=desafios,
             cargo=cargo,
         )
-        await whatsapp_client.send_text(phone, resposta_qa)
+        resposta_qa = await _send_guarded(
+            phone,
+            resposta_qa,
+            messages.OUTPUT_GUARD_FALLBACK,
+            contact,
+            f"qa_{current_step.value}",
+        )
         historico = _append_turn(historico, "a", resposta_qa)
 
         # Reseta contador de fora-do-escopo ao responder dentro do escopo.
@@ -353,13 +468,22 @@ async def _handle_m1(phone, email, contact, codigos, desafios, historico):
 
 
 async def _handle_m2(phone, email, contact, codigos, desafios, n2_signal, cargo, historico):
-    n2_pts, n2_ofertas = score_n2(codigos)
-    next_step = transitions.next_step_after_m2(codigos)
-    new_n2_signal = ",".join(codigos)
+    # Separa códigos de AI First dos códigos de dor principal antes de
+    # passar para score_n2, que só conhece os códigos em n2_sinais_dor.
+    _AI_CODES = {"ia_interesse_explicito", "ia_resistencia_explicita"}
+    codigos_dor = [c for c in codigos if c not in _AI_CODES]
+    codigos_ai = [c for c in codigos if c in _AI_CODES]
+
+    n2_pts, n2_ofertas = score_n2(codigos_dor)
+    ai_pts, ai_nivel = score_ai_first(codigos_ai)
+    next_step = transitions.next_step_after_m2(codigos_dor)
+    new_n2_signal = ",".join(codigos_dor)
 
     properties = {
         "score_n2": n2_pts,
         "n2_signal": new_n2_signal,
+        "score_ai_first": ai_pts,
+        "ai_first_nivel": ai_nivel,
         "av_current_step": next_step.value,
         "av_esclarecimento_count": 0,
         "av_fora_escopo_count": 0,
@@ -378,7 +502,7 @@ async def _handle_m2(phone, email, contact, codigos, desafios, n2_signal, cargo,
     step_target = "m4_enviada" if next_step == AVStep.M4_ENVIADA else "m3_enviada"
     fallback = messages.M4_AUTORIDADE if step_target == "m4_enviada" else messages.M3_TIMELINE
 
-    msg = compose_step_message(
+    msg = await compose_step_message(
         step_target,
         desafios=desafios,
         n2_signal=new_n2_signal,
@@ -386,7 +510,8 @@ async def _handle_m2(phone, email, contact, codigos, desafios, n2_signal, cargo,
         historico=historico,
         fallback_message=fallback,
     )
-    await whatsapp_client.send_text(phone, msg)
+    # C3: output guard antes de enviar mensagem LLM-gerada.
+    msg = await _send_guarded(phone, msg, fallback, contact, step_target)
     historico = _append_turn(historico, "a", msg)
     properties["av_historico_resumido"] = _serialize_historico(historico)
 
@@ -399,7 +524,7 @@ async def _handle_m3(phone, email, contact, codigos, desafios, n2_signal, cargo,
     t_pts = score_timeline(nivel_timeline)
     next_step = transitions.next_step_after_m3()
 
-    msg = compose_step_message(
+    msg = await compose_step_message(
         "m4_enviada",
         desafios=desafios,
         n2_signal=n2_signal,
@@ -407,7 +532,8 @@ async def _handle_m3(phone, email, contact, codigos, desafios, n2_signal, cargo,
         historico=historico,
         fallback_message=messages.M4_AUTORIDADE,
     )
-    await whatsapp_client.send_text(phone, msg)
+    # C3: output guard antes de enviar mensagem LLM-gerada.
+    msg = await _send_guarded(phone, msg, messages.M4_AUTORIDADE, contact, "m4_enviada")
     historico = _append_turn(historico, "a", msg)
 
     await hubspot_client.upsert_contact(
@@ -431,7 +557,7 @@ async def _handle_m4(phone, email, contact, codigos, desafios, n2_signal, cargo,
     score_a_novo = adjust_authority_m4(score_a_atual, ajuste, cargo_categoria)
     next_step = transitions.next_step_after_m4()
 
-    msg = compose_step_message(
+    msg = await compose_step_message(
         "m5_enviada",
         desafios=desafios,
         n2_signal=n2_signal,
@@ -439,7 +565,8 @@ async def _handle_m4(phone, email, contact, codigos, desafios, n2_signal, cargo,
         historico=historico,
         fallback_message=messages.M5_FIT_BUDGET,
     )
-    await whatsapp_client.send_text(phone, msg)
+    # C3: output guard antes de enviar mensagem LLM-gerada.
+    msg = await _send_guarded(phone, msg, messages.M5_FIT_BUDGET, contact, "m5_enviada")
     historico = _append_turn(historico, "a", msg)
 
     await hubspot_client.upsert_contact(
@@ -624,6 +751,13 @@ def _build_closer_briefing(
     horario_linha = (
         f"Horário preferencial: {horario_preferencial}\n" if horario_preferencial else ""
     )
+    ai_nivel = p.get("ai_first_nivel", "media")
+    ai_pts = p.get("score_ai_first", "2")
+    ai_oferta_hint = (
+        " → priorizar GenAI/Agentic Squad na abertura"
+        if ai_nivel == "alta"
+        else (" → evitar pitch AI First como abertura" if ai_nivel == "baixa" else "")
+    )
     return (
         f"BRIEFING PARA CLOSER — {tier}\n"
         f"{'=' * 40}\n"
@@ -634,6 +768,7 @@ def _build_closer_briefing(
         f"Desafio (formulário): {p.get('desafios', '')}\n"
         f"Sinal de dor: {p.get('n2_signal', '')}\n"
         f"Oferta sugerida: {p.get('oferta_recomendada', '')}\n"
+        f"AI First Receptiveness: {ai_nivel} ({ai_pts} pts){ai_oferta_hint}\n"
         f"{horario_linha}"
         f"Score: {score_total} | Tier: {tier}\n"
         f"{'=' * 40}\n"
@@ -642,17 +777,58 @@ def _build_closer_briefing(
 
 
 # ---------------------------------------------------------------------------
-# Parser do payload da Meta
+# Parser do payload da Z-API
 # ---------------------------------------------------------------------------
 
-def _parse_meta_payload(payload: dict) -> tuple[str | None, str | None]:
-    """Extrai (telefone, texto) do payload padrão de webhook da Meta Cloud API.
-    Retorna (None, None) para eventos que não são mensagens de texto."""
+def _parse_zapi_payload(payload: dict) -> tuple[str | None, str | None]:
+    """Extrai (telefone, texto) do payload de webhook da Z-API.
+
+    Retorna (None, None) para:
+      - Eventos que não são mensagens recebidas (type != "ReceivedCallback")
+      - Mensagens enviadas pela própria Alana (fromMe=True)
+      - Mensagens de grupos (participantPhone != null)
+      - Mensagens que não são texto (áudio, imagem, documento, etc.)
+
+    Formato esperado do payload Z-API (ReceivedCallback):
+      {
+        "type": "ReceivedCallback",
+        "phone": "5544999999999",
+        "fromMe": false,
+        "participantPhone": null,
+        "chatName": "João Silva",
+        "senderName": "João Silva",
+        "text": {
+          "message": "Texto da mensagem"
+        },
+        "instanceId": "3F675C...",
+        "messageId": "..."
+      }
+    """
     try:
-        value = payload["entry"][0]["changes"][0]["value"]
-        message = value["messages"][0]
-        if message["type"] != "text":
+        # Só processa mensagens recebidas
+        if payload.get("type") != "ReceivedCallback":
             return None, None
-        return message["from"], message["text"]["body"]
-    except (KeyError, IndexError):
+
+        # Ignora mensagens enviadas pela própria Alana
+        if payload.get("fromMe"):
+            return None, None
+
+        # Ignora mensagens de grupos (participantPhone é não-nulo em grupos)
+        if payload.get("participantPhone"):
+            return None, None
+
+        phone = payload.get("phone", "")
+        if not phone:
+            return None, None
+
+        # Extrai o texto da mensagem
+        text_obj = payload.get("text", {})
+        text = text_obj.get("message", "") if isinstance(text_obj, dict) else ""
+
+        if not text or not text.strip():
+            return None, None
+
+        return phone, text.strip()
+
+    except (KeyError, TypeError, AttributeError):
         return None, None

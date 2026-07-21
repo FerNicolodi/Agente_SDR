@@ -8,8 +8,13 @@ fechada; ajustar CRM_OBJECT_TYPE quando definido.
 from __future__ import annotations
 
 import os
+import time
 
 import httpx
+
+from ..lib.logger import get_logger, mask_phone
+
+logger = get_logger(__name__)
 
 BASE_URL = "https://api.hubapi.com"
 CRM_OBJECT_TYPE = "contacts"
@@ -34,6 +39,10 @@ _CONTACT_PROPERTIES = [
     "n2_signal", "oferta_recomendada",
     # Classificação final
     "tier",
+    # Rate limiting
+    "av_last_submission_at",
+    # Receptividade AI First
+    "score_ai_first", "ai_first_nivel",
 ]
 
 
@@ -45,16 +54,48 @@ def _headers() -> dict:
 
 
 async def find_contact_by_phone(phone: str) -> dict | None:
-    payload = {
-        "filterGroups": [{"filters": [{"propertyName": "phone", "operator": "EQ", "value": phone}]}],
-        "properties": _CONTACT_PROPERTIES,
-        "limit": 1,
-    }
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(f"{BASE_URL}/crm/v3/objects/{CRM_OBJECT_TYPE}/search", headers=_headers(), json=payload)
-        resp.raise_for_status()
-        results = resp.json().get("results", [])
-        return results[0] if results else None
+    t0 = time.monotonic()
+    try:
+        payload = {
+            "filterGroups": [{"filters": [{"propertyName": "phone", "operator": "EQ", "value": phone}]}],
+            "properties": _CONTACT_PROPERTIES,
+            "limit": 1,
+        }
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{BASE_URL}/crm/v3/objects/{CRM_OBJECT_TYPE}/search",
+                headers=_headers(),
+                json=payload,
+            )
+            resp.raise_for_status()
+            results = resp.json().get("results", [])
+            found = results[0] if results else None
+        logger.info(
+            "hubspot:find_contact_by_phone",
+            extra={
+                "context": {
+                    "tool": "hubspot.find_contact_by_phone",
+                    "phone": mask_phone(phone),
+                    "found": found is not None,
+                    "status_code": resp.status_code,
+                    "duration_ms": round((time.monotonic() - t0) * 1000),
+                }
+            },
+        )
+        return found
+    except Exception as exc:
+        logger.error(
+            "hubspot:find_contact_by_phone:error",
+            extra={
+                "context": {
+                    "tool": "hubspot.find_contact_by_phone",
+                    "phone": mask_phone(phone),
+                    "error": str(exc),
+                    "duration_ms": round((time.monotonic() - t0) * 1000),
+                }
+            },
+        )
+        raise
 
 
 async def upsert_contact(email: str, properties: dict) -> dict:
@@ -62,19 +103,55 @@ async def upsert_contact(email: str, properties: dict) -> dict:
     `properties` deve usar exatamente os nomes internos definidos na
     Especificação Técnica, seção 6 (score_b, score_a, ..., tier, av_current_step, ...).
     """
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            f"{BASE_URL}/crm/v3/objects/{CRM_OBJECT_TYPE}?idProperty=email",
-            headers=_headers(),
-            json={"properties": {**properties, "email": email}},
+    t0 = time.monotonic()
+    # Campos de log seguro: não inclui scores ou dados sensíveis, só estado da conversa.
+    safe_props = {
+        k: v for k, v in properties.items()
+        if k in ("av_current_step", "tier")
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{BASE_URL}/crm/v3/objects/{CRM_OBJECT_TYPE}?idProperty=email",
+                headers=_headers(),
+                json={"properties": {**properties, "email": email}},
+            )
+            resp.raise_for_status()
+            result = resp.json()
+        logger.info(
+            "hubspot:upsert_contact",
+            extra={
+                "context": {
+                    "tool": "hubspot.upsert_contact",
+                    "contact_id": result.get("id"),
+                    "props_updated": list(properties.keys()),
+                    "step": safe_props.get("av_current_step"),
+                    "tier": safe_props.get("tier"),
+                    "status_code": resp.status_code,
+                    "duration_ms": round((time.monotonic() - t0) * 1000),
+                }
+            },
         )
-        resp.raise_for_status()
-        return resp.json()
+        return result
+    except Exception as exc:
+        logger.error(
+            "hubspot:upsert_contact:error",
+            extra={
+                "context": {
+                    "tool": "hubspot.upsert_contact",
+                    "props_attempted": list(properties.keys()),
+                    "error": str(exc),
+                    "duration_ms": round((time.monotonic() - t0) * 1000),
+                }
+            },
+        )
+        raise
 
 
 async def create_task(contact_id: str, title: str, body: str, priority: str, due_in_hours: int) -> dict:
     """Cria a Task de handoff para o Closer, conforme o protocolo de briefing
     do Script da Alana (Script_Atendente_Virtual_DGS.docx, seção 5)."""
+    t0 = time.monotonic()
     payload = {
         "properties": {
             "hs_task_subject": title,
@@ -89,7 +166,41 @@ async def create_task(contact_id: str, title: str, body: str, priority: str, due
             }
         ],
     }
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(f"{BASE_URL}/crm/v3/objects/tasks", headers=_headers(), json=payload)
-        resp.raise_for_status()
-        return resp.json()
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{BASE_URL}/crm/v3/objects/tasks",
+                headers=_headers(),
+                json=payload,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+        logger.info(
+            "hubspot:create_task",
+            extra={
+                "context": {
+                    "tool": "hubspot.create_task",
+                    "contact_id": contact_id,
+                    "task_id": result.get("id"),
+                    "priority": priority,
+                    "due_in_hours": due_in_hours,
+                    "status_code": resp.status_code,
+                    "duration_ms": round((time.monotonic() - t0) * 1000),
+                }
+            },
+        )
+        return result
+    except Exception as exc:
+        logger.error(
+            "hubspot:create_task:error",
+            extra={
+                "context": {
+                    "tool": "hubspot.create_task",
+                    "contact_id": contact_id,
+                    "priority": priority,
+                    "error": str(exc),
+                    "duration_ms": round((time.monotonic() - t0) * 1000),
+                }
+            },
+        )
+        raise

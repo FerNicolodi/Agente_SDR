@@ -57,6 +57,11 @@ router = APIRouter()
 logger = get_logger(__name__)
 
 ZAPI_CLIENT_TOKEN = os.environ.get("ZAPI_CLIENT_TOKEN", "")
+# Token de instância Z-API — usado como fallback de autenticação quando o
+# Security Token não está configurado no painel (Z-API envia `z-api-token`
+# em todo webhook; se o Security Token estiver configurado, também envia
+# `client-token`).
+ZAPI_TOKEN = os.environ.get("ZAPI_TOKEN", "")
 
 # Códigos válidos por etapa — forçam o LLM a um enum fechado
 # (Especificação Técnica, seção 9). Nunca texto livre.
@@ -200,10 +205,20 @@ async def _send_guarded(
 
 @router.post("/webhook/whatsapp")
 async def receive_whatsapp_message(request: Request):
-    # Verifica o header `client-token` enviado pela Z-API em cada webhook.
-    client_token = request.headers.get("client-token")
-    if not verify_zapi_webhook(client_token, ZAPI_CLIENT_TOKEN):
-        raise HTTPException(status_code=401, detail="client-token inválido")
+    # Autenticação do webhook Z-API.
+    # Z-API envia `client-token` somente quando o Security Token está
+    # configurado no painel (aba Segurança da instância). Sem ele, a Z-API
+    # envia apenas `z-api-token` (token da instância). Aceitamos os dois:
+    # - `client-token` verificado contra ZAPI_CLIENT_TOKEN (preferencial).
+    # - `z-api-token` verificado contra ZAPI_TOKEN (fallback).
+    client_token_header = request.headers.get("client-token")
+    zapi_token_header = request.headers.get("z-api-token")
+    auth_ok = (
+        (client_token_header and verify_zapi_webhook(client_token_header, ZAPI_CLIENT_TOKEN))
+        or (zapi_token_header and ZAPI_TOKEN and verify_zapi_webhook(zapi_token_header, ZAPI_TOKEN))
+    )
+    if not auth_ok:
+        raise HTTPException(status_code=401, detail="token inválido")
 
     payload = await request.json()
     phone, lead_message = _parse_zapi_payload(payload)

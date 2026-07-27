@@ -1,0 +1,23 @@
+.env
+.env.local
+.env.*.local
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+venv/
+.venv/
+
+# Achado da revisão de segurança (2026-07-27): pacotes .zip pro Portal de
+# Deploy DB1 incluem o .env real (segredos em texto puro) por design da
+# skill apps-db1 — nunca devem ficar soltos na pasta do repo nem serem
+# commitados. Gerar, subir no portal, e apagar logo em seguida.
+*.zip
+*.tar.gz
+
+# Documentos de negócio e artefatos do Word ficam fora do repo de código
+# (fonte de verdade continua sendo os arquivos locais/Word, não o Git).
+*.docx
+~$*
+fluxo_*.html
+fluxo_*.png

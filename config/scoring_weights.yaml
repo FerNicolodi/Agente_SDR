@@ -1,0 +1,97 @@
+# Score BANT DGS — pesos e caps versionados.
+# Fonte de verdade de negócio: Score_Agente SDR DGS_Bant_2026.docx
+# Qualquer alteração aqui precisa da aprovação de Fernando Nicolodi antes de subir para produção.
+
+budget:
+  brackets:
+    - { min: 500_000_000, porte: "Enterprise", pts: 25 }
+    - { min: 100_000_000, porte: "Mid-Market Forte", pts: 18 }
+    - { min: 50_000_000, porte: "Mid-Market Borderline", pts: 10 }
+    - { min: 0, porte: "Abaixo do ICP", pts: 0 }
+  bonus:
+    budget_aprovado: 5
+    lucro_real: 3
+
+authority:
+  cto_vp_head_ti: 15
+  ceo_coo_cfo: 13
+  gerente_arquiteto: 9
+  tech_lead_dev_senior: 5
+  gerente_projetos_pmo: 4
+  marketing_rh_compras_juridico: 1
+  nao_identificado: 0
+  ajuste_m4:
+    autonomia_total: 2   # só aplicado se o cargo do formulário for intermediário (ver adjust_authority_m4)
+    tecnico_sem_cto_no_cargo: -3
+
+n1_setor:
+  cap: 15
+  finance_tradicional: { pts: 15, oferta: "Legado ASE + Open Finance", label: "Finance Tradicional" }
+  construcao_imobiliario: { pts: 15, oferta: "Core Up + Legado", label: "Construção/Imobiliário" }
+  educacao: { pts: 12, oferta: "Core Up + Tech Talent", label: "Educação" }
+  industria_manufatura_agro: { pts: 12, oferta: "Legado + Tech Talent", label: "Indústria/Manufatura/Agronegócio" }
+  varejo_core_proprietario: { pts: 12, oferta: "Core Up + Open Finance", label: "Varejo" }
+  saude_utilities_governo: { pts: 8, oferta: "Core Up + Legado", label: "Saúde/Utilities/Governo" }
+  fintech_scale_up_complementar: { pts: 6, oferta: "Open Finance / Agentic Squad", label: "Fintech/Scale-up" }
+  tech_native_sem_projeto: { pts: 0, oferta: "Desqualificar", label: "Tech Native" }
+
+n2_sinais_dor:
+  cap: 15
+  sistema_parou: { pts: 15, oferta: "Legado ASE" }
+  profissional_chave_saiu: { pts: 14, oferta: "Legado ASE / Core Up" }
+  prazo_regulatorio: { pts: 13, oferta: "Open Finance" }
+  backlog_represado: { pts: 10, oferta: "Core Up / Tech Talent" }
+  m_e_a_recente: { pts: 9, oferta: "Legado ASE" }
+  vaga_senior_aberta: { pts: 9, oferta: "Tech Talent / Agentic Squad" }
+  auditoria_nao_conformidade: { pts: 8, oferta: "Legado ASE" }
+  ia_parada_sem_expertise: { pts: 8, oferta: "Agentic Squad" }
+  quer_produto_novo: { pts: 8, oferta: "Produtos Digitais / Product Discovery" }  # v0.6
+  novo_cto_recente: { pts: 7, oferta: "Core Up / Assessment" }
+  precisa_integrar_parceiros: { pts: 7, oferta: "Integração de APIs e Sistemas" }  # v0.6
+  pressao_concorrente: { pts: 6, oferta: "Core Up + Legado" }
+  precisa_mais_desenvolvedores: { pts: 6, oferta: "Staff Augmentation / Tech Talent" }  # v0.6
+  custo_manutencao_crescente: { pts: 5, oferta: "Legado ASE / Core Up" }
+  budget_ti_aprovado: { pts: 4, oferta: "Todas as ofertas" }
+  nao_sabe_por_onde_comecar: { pts: 4, oferta: "Assessment" }  # v0.6
+
+n3_tecnografia:
+  cap: 10
+  time_ti_20_200: { pts: 5, oferta: "Todas" }
+  linguagens_legadas: { pts: 4, oferta: "Legado ASE / Core Up" }
+  erp_sem_api: { pts: 3, oferta: "Core Up / Open Finance" }
+  on_premise: { pts: 3, oferta: "Legado / Cloud Eng." }
+  sem_ia_producao: { pts: 3, oferta: "Agentic Squad / GenAI" }
+  cicd_ausente: { pts: 2, oferta: "Core Up / Tech Talent" }
+  excel_principal_ferramenta: { pts: 2, oferta: "Core Up / Data Eng." }
+  cloud_incipiente: { pts: 2, oferta: "FinOps / Cloud Eng." }
+
+timeline:
+  critica: 20
+  alta: 15
+  media: 10
+  difusa: 5
+  indefinida: 0
+
+tiers:
+  hot: 75
+  warm: 55
+  tepid: 35
+  # abaixo de tepid = COLD
+
+ai_first_receptiveness:
+  # Capturado oportunisticamente na M2 — não é uma pergunta dedicada.
+  # ia_interesse_explicito: lead menciona iniciativas de IA, AI First, GenAI, agentes de IA.
+  # ia_resistencia_explicita: lead demonstra resistência ou descarte explícito de IA.
+  # Ausência de ambos = media (2 pts) — atribuído como default em _handle_m2.
+  ia_interesse_explicito: 5
+  ia_resistencia_explicita: 0
+  media_default: 2
+
+disqualifiers:
+  D1: "Tech native com 10+ vagas CLT de TI abertas nos últimos 6 meses"
+  D2: "Startup com menos de 100 funcionários"
+  D3: "Empresa em corte ativo de orçamento de TI"
+  D4: "Time de TI com menos de 10 pessoas internas"
+  D5: "Decisão exclusivamente por preço — quer body shop de horas sem SLA"
+  D6: "Já possui squad interno especializado na especialidade requerida"
+  D7: "Fintech S1 em processo de internalização total do time de engenharia"

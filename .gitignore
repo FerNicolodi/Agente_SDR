@@ -15,6 +15,11 @@ venv/
 *.zip
 *.tar.gz
 
+# Logs de runtime (M2 — log storage separado) nunca devem ir pro repo,
+# mesmo com PII mascarada.
+logs/
+*.log
+
 # Documentos de negócio e artefatos do Word ficam fora do repo de código
 # (fonte de verdade continua sendo os arquivos locais/Word, não o Git).
 *.docx

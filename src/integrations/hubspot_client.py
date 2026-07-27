@@ -4,11 +4,23 @@
 Objeto alvo (Contact vs. Deal) ainda em aberto — ver seção 12 da
 Especificação Técnica. Este cliente assume Contact até essa decisão ser
 fechada; ajustar CRM_OBJECT_TYPE quando definido.
+
+STORAGE_BACKEND
+---------------
+Defina `STORAGE_BACKEND=memory` no .env para usar armazenamento em memória
+(dict Python) sem depender do HubSpot. Útil enquanto o Private App e as
+propriedades customizadas ainda não estão configurados em produção.
+
+  STORAGE_BACKEND=memory  → estado vive no processo; zerado a cada restart
+  STORAGE_BACKEND=hubspot → comportamento padrão de produção (default)
+
+Quando mudar para hubspot, basta remover/alterar a variável e fazer redeploy.
 """
 from __future__ import annotations
 
 import os
 import time
+import uuid
 
 import httpx
 
@@ -18,6 +30,49 @@ logger = get_logger(__name__)
 
 BASE_URL = "https://api.hubapi.com"
 CRM_OBJECT_TYPE = "contacts"
+
+# ── Backend em memória (paliatvo enquanto HubSpot não está configurado) ────────
+# Dois índices para suportar lookup por e-mail (upsert) e por telefone (find).
+_mem_by_email: dict[str, dict] = {}   # email → contact_record
+_mem_by_phone: dict[str, str] = {}    # phone → email
+
+
+def _use_memory() -> bool:
+    return os.environ.get("STORAGE_BACKEND", "hubspot").strip().lower() == "memory"
+
+
+def _mem_find_by_phone(phone: str) -> dict | None:
+    email = _mem_by_phone.get(phone)
+    return _mem_by_email.get(email) if email else None
+
+
+def _mem_upsert(email: str, properties: dict) -> dict:
+    existing = _mem_by_email.get(email)
+    if existing:
+        existing["properties"].update(properties)
+        existing["properties"]["email"] = email
+    else:
+        existing = {
+            "id": f"mem-{uuid.uuid4().hex[:8]}",
+            "properties": {"email": email, **properties},
+        }
+        _mem_by_email[email] = existing
+
+    # Mantém índice por telefone atualizado
+    phone = existing["properties"].get("phone")
+    if phone:
+        _mem_by_phone[phone] = email
+
+    return existing
+
+
+def _mem_create_task(contact_id: str, title: str, body: str, priority: str) -> dict:
+    task = {"id": f"task-{uuid.uuid4().hex[:8]}", "title": title, "priority": priority}
+    logger.info(
+        "memory_store:create_task",
+        extra={"context": {"contact_id": contact_id, "title": title, "priority": priority, "body_preview": body[:120]}},
+    )
+    return task
 
 # Propriedades buscadas em toda chamada a find_contact_by_phone.
 # Mantidas aqui para facilitar sync com a seção 6 da Especificação Técnica
@@ -54,6 +109,14 @@ def _headers() -> dict:
 
 
 async def find_contact_by_phone(phone: str) -> dict | None:
+    if _use_memory():
+        result = _mem_find_by_phone(phone)
+        logger.info(
+            "memory_store:find_contact_by_phone",
+            extra={"context": {"phone": mask_phone(phone), "found": result is not None}},
+        )
+        return result
+
     t0 = time.monotonic()
     try:
         payload = {
@@ -103,6 +166,21 @@ async def upsert_contact(email: str, properties: dict) -> dict:
     `properties` deve usar exatamente os nomes internos definidos na
     Especificação Técnica, seção 6 (score_b, score_a, ..., tier, av_current_step, ...).
     """
+    if _use_memory():
+        result = _mem_upsert(email, properties)
+        logger.info(
+            "memory_store:upsert_contact",
+            extra={
+                "context": {
+                    "contact_id": result["id"],
+                    "props_updated": list(properties.keys()),
+                    "step": properties.get("av_current_step"),
+                    "tier": properties.get("tier"),
+                }
+            },
+        )
+        return result
+
     t0 = time.monotonic()
     # Campos de log seguro: não inclui scores ou dados sensíveis, só estado da conversa.
     safe_props = {
@@ -151,6 +229,9 @@ async def upsert_contact(email: str, properties: dict) -> dict:
 async def create_task(contact_id: str, title: str, body: str, priority: str, due_in_hours: int) -> dict:
     """Cria a Task de handoff para o Closer, conforme o protocolo de briefing
     do Script da Alana (Script_Atendente_Virtual_DGS.docx, seção 5)."""
+    if _use_memory():
+        return _mem_create_task(contact_id, title, body, priority)
+
     t0 = time.monotonic()
     payload = {
         "properties": {

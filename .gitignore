@@ -20,6 +20,10 @@ venv/
 logs/
 *.log
 
+# Artefatos temporários de sessão / workaround de git
+alana-fix/
+git-push.command
+
 # Documentos de negócio e artefatos do Word ficam fora do repo de código
 # (fonte de verdade continua sendo os arquivos locais/Word, não o Git).
 *.docx

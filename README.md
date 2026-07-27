@@ -2,7 +2,7 @@
 
 Agente de qualificação de leads inbound via WhatsApp. Recebe contatos do formulário do site da DGS, conduz a qualificação BANT em 5 etapas (M1–M5), classifica o lead em HOT/WARM/TEPID/COLD e notifica o Closer via Slack com o briefing completo.
 
-**Stack:** Python 3.12 · FastAPI · Anthropic Claude · HubSpot · Meta WhatsApp Business API
+**Stack:** Python 3.12 · FastAPI · Anthropic Claude · HubSpot · Z-API (WhatsApp SaaS)
 
 ---
 
@@ -27,7 +27,7 @@ Diagrama completo: `arquitetura_alana_sdr.svg`
 
 - Python 3.12+
 - Conta HubSpot com Private App token (escopos abaixo)
-- Meta Business Manager com número WhatsApp aprovado
+- Conta Z-API (z-api.io) com instância WhatsApp conectada
 - API key Anthropic (Claude Sonnet)
 - SMTP configurado (Office 365 ou equivalente)
 
@@ -54,25 +54,17 @@ cp .env.example .env
 | Variável | Descrição | Obrigatório |
 |----------|-----------|-------------|
 | `ANTHROPIC_API_KEY` | API key Anthropic | ✅ |
-| `META_APP_SECRET` | Secret do app Meta (verificação HMAC do webhook) | ✅ |
-| `META_WA_TOKEN` | Token de acesso permanente WhatsApp Business | ✅ |
-| `META_WA_PHONE_NUMBER_ID` | ID do número de telefone no Meta | ✅ |
-| `META_WA_VERIFY_TOKEN` | Token de verificação do webhook Meta (você define) | ✅ |
+| `ZAPI_INSTANCE_ID` | ID da instância Z-API | ✅ |
+| `ZAPI_TOKEN` | Token da instância Z-API | ✅ |
+| `ZAPI_CLIENT_TOKEN` | Client token de segurança do webhook Z-API | ✅ |
 | `SITE_FORM_HMAC_SECRET` | Secret compartilhado com o formulário do site (HMAC) | ✅ |
 | `HUBSPOT_API_KEY` | Private App token HubSpot (`pat-na-...`) | ✅ |
 | `HUBSPOT_WORKFLOW_HMAC_SECRET` | Secret do Workflow HubSpot que dispara timer-callback | ✅ |
 | `SLACK_BOT_TOKEN` | Token do bot Slack (`xoxb-...`) | ✅ |
 | `SLACK_CLOSER_CHANNEL` | ID do canal Slack para briefings do Closer | ✅ |
-| `SMTP_HOST` | Host SMTP (ex.: `smtp.office365.com`) | ✅ |
-| `SMTP_USER` | Usuário SMTP | ✅ |
-| `SMTP_PASSWORD` | Senha ou senha de aplicativo | ✅ |
-| `NOTIFICATION_EMAIL_TO` | E-mail destino das notificações internas | ✅ |
+| `STORAGE_BACKEND` | `memory` (padrão, paliativo) ou `hubspot` (produção) | — |
 | `ANTHROPIC_MODEL` | Modelo Claude (padrão: `claude-sonnet-5`) | — |
-| `LLM_TIMEOUT_SECONDS` | Timeout para chamadas LLM em segundos (padrão: `30`) | — |
 | `ALANA_ENABLED` | Kill switch: `true` para operar, `false` para pausar (padrão: `true`) | — |
-| `SMTP_PORT` | Porta SMTP (padrão: `587`) | — |
-| `SMTP_FROM` | Endereço de remetente (padrão: `SMTP_USER`) | — |
-| `RATE_LIMIT_WA_WINDOW_SECONDS` | Janela de rate limiting WhatsApp em segundos (padrão: `5`) | — |
 | `MAX_QA_RESPONSE_LENGTH` | Tamanho máximo da resposta do qa_responder (padrão: `500`) | — |
 
 > **Segurança:** nunca commite o `.env`. Ele está no `.gitignore`.
@@ -107,10 +99,10 @@ curl http://localhost:8000/healthz
 # → {"status": "ok", "alana_enabled": true}
 ```
 
-Para expor o webhook localmente para o Meta, use ngrok ou similar:
+Para expor o webhook localmente para a Z-API, use ngrok ou similar:
 ```bash
 ngrok http 8000
-# Use a URL gerada como webhook URL no Meta Business Manager
+# Use a URL gerada (https://<id>.ngrok.io/webhook/whatsapp) como webhook URL na instância Z-API
 ```
 
 ---
@@ -129,7 +121,7 @@ python3 -m pytest tests/test_output_guard.py -v
 python3 -m pytest tests/test_kill_switch.py -v
 ```
 
-### Dry-run de conversa completa (sem Meta, sem HubSpot)
+### Dry-run de conversa completa (sem Z-API, sem HubSpot)
 
 Simula o fluxo M1–M6 com LLM real, scoring real e máquina de estados real. Requer apenas `ANTHROPIC_API_KEY`.
 
@@ -201,7 +193,7 @@ src/
 │   └── transitions.py        # Funções de transição de estado
 ├── integrations/
 │   ├── hubspot_client.py      # Upsert, find, create task no HubSpot
-│   ├── whatsapp_client.py     # Envio de mensagem via Meta API
+│   ├── whatsapp_client.py     # Envio de mensagem via Z-API
 │   ├── slack_client.py        # Notificação do Closer
 │   └── email_client.py        # Notificação interna SMTP
 └── lib/

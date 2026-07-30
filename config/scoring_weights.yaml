@@ -3,10 +3,12 @@
 # Qualquer alteração aqui precisa da aprovação de Fernando Nicolodi antes de subir para produção.
 
 budget:
+  # ICP atualizado em 2026-07-29 (aprovação: Fernando Nicolodi):
+  #   - Faturamento mínimo para considerar no ICP: R$ 100M/ano (era R$ 50M)
+  #   - Faturamento ideal (perfil preferencial): acima de R$ 300M/ano
   brackets:
-    - { min: 500_000_000, porte: "Enterprise", pts: 25 }
-    - { min: 100_000_000, porte: "Mid-Market Forte", pts: 18 }
-    - { min: 50_000_000, porte: "Mid-Market Borderline", pts: 10 }
+    - { min: 300_000_000, porte: "Empresa Ideal ICP", pts: 25 }
+    - { min: 100_000_000, porte: "Mid-Market ICP", pts: 15 }
     - { min: 0, porte: "Abaixo do ICP", pts: 0 }
   bonus:
     budget_aprovado: 5

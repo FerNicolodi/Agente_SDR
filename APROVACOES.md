@@ -108,6 +108,73 @@ Cabeçalho expandido em `knowledge_base.py` com: data da última sync, lista de 
 | Task | Descrição |
 |---|---|
 | **#9** | Criar propriedades customizadas no HubSpot (ver `HUBSPOT_SETUP.md`) |
-| **#10** | Submeter template M1 `abertura_qualificacao_v1` no Meta Business Manager |
+| **#10** | ~~Submeter template M1 no Meta Business Manager~~ — **N/A**: migração para Z-API elimina necessidade de aprovação de template pela Meta. Z-API envia mensagens livres sem template. Número (44) 99180-9333 conectado em 2026-07-21. |
+
+---
+
+## Migração de Canal WhatsApp — Meta/Evolution API → Z-API
+
+**Data:** 2026-07-21
+**Aprovado por:** Fernando Nicolodi
+**Status:** ✅ Implementado e em produção
+
+**Decisão:**
+Canal WhatsApp migrado de Meta Cloud API (planejado originalmente) e Evolution API (intermediário) para Z-API (z-api.io), SaaS gerenciado. Número conectado: **(44) 99180-9333** (número comercial DB1).
+
+**Motivação:**
+- Z-API não exige aprovação de template pela Meta para envio de mensagens
+- Setup mais rápido (sem Meta Business Manager)
+- Autenticação via `ZAPI_INSTANCE_ID` + `ZAPI_TOKEN` + `ZAPI_CLIENT_TOKEN`
+
+**Impacto técnico:**
+- `src/integrations/whatsapp_client.py` — reescrito para Z-API REST
+- `src/routes/whatsapp.py` — auth aceita `client-token` (quando Security Token configurado no painel) e `z-api-token` como fallback
+- `SITE_FORM_HMAC_SECRET` permanece para autenticação do formulário do site (independente do canal)
+
+**Arquivos alterados:** `src/integrations/whatsapp_client.py`, `src/routes/whatsapp.py`, `.env.example`
+
+---
+
+## Decisões de Segurança — Revisão Pré-Produção 2026-07-27
+
+**Data:** 2026-07-27
+**Aprovado por:** Fernando Nicolodi (implícito — revisão conduzida e aceita em sessão)
+**Status:** ✅ CRIT-01 e CRIT-02 implementados · P1 pendente (decisão de arquitetura)
+
+### CRIT-01 — Gate de segredos em arquivos .zip
+Arquivos `.zip` com `.env` real (segredos em texto puro) estavam soltos na raiz do projeto sem cobertura do `.gitignore` — risco de commit acidental permanente. Corrigido: `*.zip` e `*.tar.gz` adicionados ao `.gitignore`; arquivos removidos do disco.
+
+### CRIT-02 — Gate `MEMORY_STORAGE_ACK` para modo memória
+`STORAGE_BACKEND=memory` subia em produção com apenas um `logger.warning`. Corrigido: `src/main.py` agora exige `MEMORY_STORAGE_ACK=true` explícito para inicializar em modo memória. Sem o ack, servidor recusa subir.
+
+**Decisão aceita:** `STORAGE_BACKEND=memory` com `MEMORY_STORAGE_ACK=true` em homologação enquanto `HUBSPOT_API_KEY` não for corrigida (token atual retorna 401). Em produção real: obrigatório `STORAGE_BACKEND=hubspot`.
+
+### P1 — Sem try/except em chamadas a integrações externas (PENDENTE)
+~32 chamadas a Z-API, HubSpot e Slack nas rotas de webhook sem tratamento de erro. Confirmado em homologação: falha no Z-API derruba requisição com 500, lead fica travado sem alerta. **Decisão de arquitetura pendente com Fernando antes de implementar.**
+
+---
+
+## Atualização de ICP — Faturamento Mínimo e Ideal
+
+**Data:** 2026-07-29
+**Aprovado por:** Fernando Nicolodi
+**Status:** ✅ Implementado
+
+**Mudança:**
+| Critério | Antes | Depois |
+|----------|-------|--------|
+| Faturamento mínimo para considerar no ICP | R$ 50M/ano | R$ 100M/ano |
+| Faturamento ideal (perfil preferencial) | R$ 500M/ano (Enterprise) | R$ 300M/ano |
+
+**Novos brackets de pontuação budget:**
+| Faturamento | Porte | Pontos |
+|-------------|-------|--------|
+| ≥ R$ 300M/ano | Empresa Ideal ICP | 25 pts |
+| R$ 100M–299M/ano | Mid-Market ICP | 15 pts |
+| < R$ 100M/ano | Abaixo do ICP | 0 pts |
+
+**Arquivo alterado:** `config/scoring_weights.yaml`
+
+> ⚠️ O documento `Score_Agente SDR DGS_Bant_2026.docx` precisa ser atualizado manualmente para refletir estes novos valores — é a fonte de verdade de negócio referenciada pelo YAML.
 
 ---
